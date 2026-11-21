@@ -1,0 +1,15 @@
+TalQ for Android — a native Android client for Nextcloud Talk
+Copyright 2026 Kalin Bogatzevski
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+TalQ is an independent, unofficial client. "Nextcloud" is a registered
+trademark of Nextcloud GmbH. This project is not affiliated with, endorsed
+by, or sponsored by Nextcloud GmbH; it only communicates with a Nextcloud
+server over its public HTTP APIs.
+
+This software bundles third-party components under their own licenses
+(AndroidX and Jetpack Compose, Kotlin and kotlinx, Ktor, OkHttp, Coil,
+Media3, the UnifiedPush connector, Tink, Protocol Buffers, SLF4J and
+others). Their license terms and required attributions are listed in
+THIRD-PARTY-NOTICES.md, which is distributed with this software.

@@ -1,0 +1,4 @@
+<resources>
+    <!-- Window ground before Compose draws (Vivid). -->
+    <color name="window_background">#271D12</color>
+</resources>

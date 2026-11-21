@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status bar icon: the launcher's Q, drawn for 24dp. The system tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M11.5,4.5 A7,7 0 1 1 11.49,4.5 Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2.6" />
+    <path
+        android:pathData="M15.2,15.2 L20,20"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.6" />
+</vector>

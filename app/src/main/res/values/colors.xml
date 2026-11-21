@@ -1,0 +1,7 @@
+<resources>
+    <!-- Window ground before Compose draws (Paper). -->
+    <color name="window_background">#FBF6ED</color>
+    <!-- Launcher icon: the accent with its control ink. -->
+    <color name="icon_background">#21E3C8</color>
+    <color name="icon_ink">#06201C</color>
+</resources>

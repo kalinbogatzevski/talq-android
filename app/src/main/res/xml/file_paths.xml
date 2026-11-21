@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What the FileProvider may hand out: two subfolders of the app's cache and nothing else.
+     camera/: the file the camera app writes a new photo into.
+     shared/: received files being opened in or shared to another app (read-only grants). -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+    <cache-path name="shared" path="shared/" />
+</paths>
