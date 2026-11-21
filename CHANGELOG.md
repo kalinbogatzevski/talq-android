@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.3
+
+- **A branded build is signed with its own release key** (its file sits next to the public
+  app's, outside the repository; see app/build.gradle.kts). An earlier branded build was
+  signed with a different key, so Android will not update it to this version: uninstall it
+  first (you then sign in again). Nothing changes for the public app.
+
 ## 0.4.2
 
 - **The first published build of the public app**, signed with the project's release key
