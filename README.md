@@ -56,8 +56,8 @@ server's brute-force throttle. `--args=--write` also writes into that room.
 ## Branded builds
 
 Besides the public app (`generic` flavor) the build can produce an organisation's own app
-(`branded` flavor): its own name, launcher icon, logo, server address prefilled at sign-in
-and ERP address built in. It has its own application id, so it installs next to the public
+(`branded` flavor): its own name, colours for the launcher icon, logo, and a built-in
+server address (its sign-in screen has no server field) and ERP address. It has its own application id, so it installs next to the public
 app. Everything that names the brand comes from a private store,
 `private/branding/<brand>/`, which is not part of this repository; the top of
 `app/build.gradle.kts` describes its layout. Without it only the `generic` flavor is built.

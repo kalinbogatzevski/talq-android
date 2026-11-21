@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.2
+
+- **The first published build of the public app**, signed with the project's release key
+  (certificate SHA-256 `44:E6:9A:2F:37:24:31:C0:DE:0B:08:C8:C2:9B:5F:65:44:B0:93:95:09:62:48:18:F5:E6:02:28:2E:AF:06:9B`).
+  Test builds before it were signed with a different key, so Android will not update one of
+  them to this version: uninstall it first (you then sign in again).
+- **The branded build signs in to its own server only.** Its sign-in screen has no server
+  address to type or pick: it always uses the address built into the app, also when the
+  server names a different address of its own during the sign-in.
+- **The branded build has its own launcher icon**: TalQ's Q in the organisation's colour
+  instead of its bare logo, so it is not mistaken for the organisation's other apps. The
+  notification icon is the Q as well.
+
 ## 0.4.1
 
 - **A much smaller download.** The app is now built the way a finished app is: code and

@@ -65,6 +65,24 @@ if (brandProblem != null) {
     logger.warn("TalQ: branded variants are switched off, $brandProblem Building generic only.")
 }
 
+// ---- Release signing ----------------------------------------------------------------------
+// Published generic APKs are signed with the maintainer's release key. Its location and
+// passwords come from a properties file OUTSIDE the repository: -Ptalq.signing=<file>, else
+// ~/.talq-android/signing.properties, with storeFile (relative to that file's folder, or
+// absolute), storePassword, keyAlias and keyPassword. Without that file a release build is
+// signed with the local debug key, which is fine for your own use (Android only updates an app
+// from an APK signed with the same key).
+val signingFile: File = (findProperty("talq.signing") as String?)?.trim()?.takeIf { it.isNotEmpty() }?.let { file(it) }
+    ?: File(System.getProperty("user.home"), ".talq-android/signing.properties")
+val signingProps = Properties().apply {
+    if (signingFile.isFile) signingFile.reader(Charsets.UTF_8).use { load(it) }
+}
+val hasReleaseKey: Boolean =
+    listOf("storeFile", "storePassword", "keyAlias", "keyPassword").all { !signingProps.getProperty(it).isNullOrBlank() }
+if (signingFile.isFile && !hasReleaseKey) {
+    throw GradleException("$signingFile lacks storeFile, storePassword, keyAlias or keyPassword.")
+}
+
 /** A Java string literal for a BuildConfig field. */
 fun quoted(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
@@ -80,8 +98,19 @@ android {
         applicationId = "io.github.kalinbogatzevski.talq"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.4.1"
+        versionCode = 7
+        versionName = "0.4.2"
+    }
+
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = signingFile.parentFile.resolve(signingProps.getProperty("storeFile").trim())
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias").trim()
+                keyPassword = signingProps.getProperty("keyPassword")
+            }
+        }
     }
 
     flavorDimensions += "brand"
@@ -89,6 +118,8 @@ android {
         // The public app.
         create("generic") {
             dimension = "brand"
+            // Release builds only: the debug build type keeps its own debug key.
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
             buildConfigField("boolean", "IS_BRANDED", "false")
             buildConfigField("String", "BRAND_SERVER_URL", quoted(""))
             buildConfigField("String", "BRAND_ERP_BASE_URL", quoted(""))
@@ -97,6 +128,7 @@ android {
         // The organisation's own app: its own id, so it installs next to the generic one.
         create("branded") {
             dimension = "brand"
+            signingConfig = signingConfigs.getByName("debug")
             // The fallback id is never built: without the store these variants are switched off.
             applicationId = brandValue("applicationId").ifEmpty { "talq.branded.unconfigured" }
             buildConfigField("boolean", "IS_BRANDED", "true")
@@ -113,15 +145,16 @@ android {
     buildTypes {
         // The build to hand out: shrunk (R8 drops unused code and resources, which takes the
         // APK from about 32 MB to under 4 MB) and not debuggable, so it also runs faster.
-        // Signed with the local debug key (AGP creates one on first use). Android only updates
-        // an installed app from an APK signed with the same key, so a self-built APK cannot
-        // update one built elsewhere: uninstall that first (which signs you out).
+        // Signed per flavor (see "Release signing" above): generic with the release key when
+        // there is one, else, like branded, with the local debug key (AGP creates one on first
+        // use). Android only updates an installed app from an APK signed with the same key, so
+        // a self-built APK cannot update one built elsewhere: uninstall that first (which signs
+        // you out).
         // mapping.txt (app/build/outputs/mapping/<variant>/) decodes its stack traces: keep it
         // with every APK you hand out.
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

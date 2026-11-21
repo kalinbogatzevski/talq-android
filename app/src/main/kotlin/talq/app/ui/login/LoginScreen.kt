@@ -89,12 +89,18 @@ fun LoginScreen() {
                 Text(appName, style = MaterialTheme.typography.displaySmall)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Sign in to your Nextcloud server to open your conversations.",
+                    if (Brand.isBranded) "Sign in to open your conversations."
+                    else "Sign in to your Nextcloud server to open your conversations.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(28.dp))
-                OutlinedTextField(
+                // A branded build signs in to its built-in server: no field to edit or select.
+                if (Brand.isBranded) {
+                    state.error?.let { message ->
+                        Text(message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    }
+                } else OutlinedTextField(
                     value = state.serverUrl,
                     onValueChange = model::onServerUrlChange,
                     modifier = Modifier.fillMaxWidth(),

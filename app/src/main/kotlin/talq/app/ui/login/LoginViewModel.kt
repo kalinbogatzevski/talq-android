@@ -52,7 +52,9 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
     private var loginUrl: String? = null
 
     init {
-        viewModelScope.launch {
+        // A branded build signs in to its organisation's server only: there is no address to type
+        // or pick, and the remembered one is not read.
+        if (Brand.isBranded) _state.update { it.copy(serverUrl = Brand.serverUrl) } else viewModelScope.launch {
             val last = try {
                 container.credentialStore.lastServerUrl()
             } catch (e: CancellationException) {
@@ -60,14 +62,12 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
             } catch (e: Exception) {
                 ""
             }
-            // A branded build offers its organisation's server when nothing was remembered
-            // (still editable). Brand.serverUrl is empty in the generic build.
-            val prefill = last.ifEmpty { Brand.serverUrl }
-            _state.update { if (it.serverUrl.isEmpty()) it.copy(serverUrl = prefill) else it }
+            _state.update { if (it.serverUrl.isEmpty()) it.copy(serverUrl = last) else it }
         }
     }
 
     fun onServerUrlChange(value: String) {
+        if (Brand.isBranded) return
         _state.update { it.copy(serverUrl = value, error = null) }
     }
 
@@ -94,22 +94,30 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
 
     fun login() {
         if (_state.value.busy) return
-        val url = normalize(_state.value.serverUrl)
+        val url = normalize(if (Brand.isBranded) Brand.serverUrl else _state.value.serverUrl)
         if (url == null) {
             val empty = _state.value.serverUrl.isBlank()
             _state.update {
-                it.copy(error = if (empty) "Enter the address of your Nextcloud server." else "That isn't a valid server address.")
+                it.copy(
+                    error = when {
+                        Brand.isBranded -> "This app has no valid server address built in."
+                        empty -> "Enter the address of your Nextcloud server."
+                        else -> "That isn't a valid server address."
+                    },
+                )
             }
             return
         }
         _state.update { it.copy(serverUrl = url, phase = LoginPhase.Contacting, error = null) }
         job = viewModelScope.launch {
-            try {
-                container.credentialStore.rememberServerUrl(url)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // Only a convenience for the next sign-in.
+            if (!Brand.isBranded) {
+                try {
+                    container.credentialStore.rememberServerUrl(url)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Only a convenience for the next sign-in.
+                }
             }
             // The server lists the app password under this name ("Devices & sessions").
             val flow = LoginFlow(url, deviceName = "$appName for Android")
@@ -131,7 +139,7 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
             }
             loginUrl = session.loginUrl
             _state.update { it.copy(phase = LoginPhase.WaitingForBrowser, browserUrl = session.loginUrl) }
-            val credentials = try {
+            val answered = try {
                 flow.await(session)
             } catch (e: TalkError) {
                 fail(
@@ -141,6 +149,9 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
                 )
                 return
             }
+            // The server names its own canonical address in the answer, and the generic app
+            // follows it. A branded build stays on its built-in server whatever the answer says.
+            val credentials = if (Brand.isBranded) answered.copy(server = flow.serverUrl) else answered
             _state.update { it.copy(phase = LoginPhase.Finishing, browserUrl = null) }
             try {
                 container.signIn(credentials)
@@ -170,7 +181,7 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
         if (browserOnTop) container.bringToFront()
     }
 
-    private fun startError(e: TalkError): String = when (e) {
+    private fun startError(e: TalkError): String = if (Brand.isBranded) brandedStartError(e) else when (e) {
         is TalkError.Network -> when (e.cause) {
             is UnknownHostException -> "Can't find that server. Check the address and your connection."
             is SSLException -> "Couldn't make a secure connection to that server."
@@ -179,6 +190,16 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
         is TalkError.Server -> "The server reported an error (${e.status}). Try again in a moment."
         // 404, 403, HTML instead of JSON, other statuses: something answers there, but not Nextcloud.
         else -> "That address doesn't look like a Nextcloud server."
+    }
+
+    /** The branded build has no address the user could check: say what is left to try. */
+    private fun brandedStartError(e: TalkError): String = when (e) {
+        is TalkError.Network -> when (e.cause) {
+            is SSLException -> "Couldn't make a secure connection to the server."
+            else -> "Can't reach the server. Check your connection."
+        }
+        is TalkError.Server -> "The server reported an error (${e.status}). Try again in a moment."
+        else -> "The server can't start a sign-in right now. Try again later."
     }
 
     private companion object {
