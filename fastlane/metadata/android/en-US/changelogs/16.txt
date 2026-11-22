@@ -1,0 +1,1 @@
+0.5.7: italic and bold text that holds inline code with a star in it shows correctly again, and a link written inside another link label no longer nests.

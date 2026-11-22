@@ -290,22 +290,16 @@ private class Inline(
 
     /**
      * Index of the closing [marker], or -1. The text between must not start or end with a space,
-     * and an escaped marker (`\*`) closes nothing. A marker that can only open (a space before
-     * it, none after: the " *b" of "*a *b*") starts a new emphasis, and the outer one has no
-     * closer, as in CommonMark.
+     * and an escaped marker (`\*`) closes nothing.
      */
     private fun closing(s: String, marker: String, from: Int, end: Int): Int {
         if (from >= end || s[from].isWhitespace()) return -1
         var at = s.indexOf(marker, from)
         while (at in from until end) {
-            if (at > from && !escaped(s, at, from)) {
-                if (!s[at - 1].isWhitespace()) {
-                    // "*" must not match the first star of "**".
-                    if (marker.length == 2 || !(at + 1 < end && s[at + 1] == marker[0])) return at
-                    at++
-                } else if (at + marker.length < end && !s[at + marker.length].isWhitespace()) {
-                    return -1
-                }
+            if (at > from && !s[at - 1].isWhitespace() && !escaped(s, at, from)) {
+                // "*" must not match the first star of "**".
+                if (marker.length == 2 || !(at + 1 < end && s[at + 1] == marker[0])) return at
+                at++
             }
             at = s.indexOf(marker, at + 1)
         }
@@ -314,7 +308,9 @@ private class Inline(
 
     /**
      * Index of the "]" that closes the link label opened at [open], or -1: brackets in between
-     * must pair up, and escaped ones (`\]`) count for nothing.
+     * must pair up; escaped ones (`\]`) and those inside `code` count for nothing; and a label
+     * holding a whole link of its own ("[a [b](x) c](y)") is no label, since a link cannot hold
+     * a link.
      */
     private fun labelEnd(s: String, open: Int, end: Int): Int {
         var depth = 0
@@ -322,8 +318,17 @@ private class Inline(
         while (j < end) {
             when (s[j]) {
                 '\\' -> if (j + 1 < end && s[j + 1].isAsciiPunctuation()) j++
+                '`' -> {
+                    // The same code span rule as in span(): at least one character between.
+                    val close = s.indexOf('`', j + 1)
+                    if (close in (j + 2) until end) j = close
+                }
                 '[' -> depth++
-                ']' -> if (depth == 0) return j else depth--
+                ']' -> when {
+                    depth == 0 -> return j
+                    j + 1 < end && s[j + 1] == '(' -> return -1
+                    else -> depth--
+                }
             }
             j++
         }

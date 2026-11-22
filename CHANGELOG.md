@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.7
+
+- **Italic and bold around inline code show correctly again.** 0.5.6 drew
+  ``*run `rm *.tmp` first*`` (a star inside the code) with its stars instead of in italic; the
+  rule behind that is undone, so emphasis is drawn as in 0.5.5 again, with escapes still
+  respected. (The 0.5.6 change to `*a *b*` goes with it.)
+- **Link labels with code or links in them.** A `]` inside inline code no longer ends a link's
+  label (`` [`a]`](https://…) `` is one link again), and a link written inside another link's
+  label is drawn as a link in plain brackets instead of a link inside a link.
+
 ## 0.5.6
 
 - **Escaped characters show without their backslash.** A message whose text was escaped
