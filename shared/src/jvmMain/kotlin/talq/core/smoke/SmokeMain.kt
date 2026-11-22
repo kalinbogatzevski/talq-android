@@ -130,6 +130,8 @@ object SmokeMain {
         println("  notifications ocs-endpoints=${caps.notificationFeatures} push=${caps.notificationPush}")
         check("talk installed", caps.hasTalk)
         check("threads capability", caps.threads)
+        check("read status capability", caps.readStatus)
+        check("bot A shares its read status", caps.sharesReadStatus)
         check("bad password gives Unauthorized", try {
             TalkSession.open(credsA.copy(appPassword = "definitely-wrong")).close(); false
         } catch (e: TalkError.Unauthorized) { true } catch (e: TalkError) { println("    got $e"); false })
@@ -291,6 +293,10 @@ object SmokeMain {
         println("  root raw: ${info.first?.raw?.filterKeys { it in setOf("id", "threadId", "isThread", "threadTitle", "threadReplies", "metaData") }}")
         check("create returns the new topic", info.title == title && rootId > 0)
 
+        // Read status: nobody but A has seen the new root yet.
+        check("A's root is not read by everyone before B saw it", allA.commonRead.value < rootId,
+            "commonRead=${allA.commonRead.value} root=$rootId")
+
         val topicB = b.chat(token, ChatScope.Topic(rootId))
         check("B loads the topic", topicB.refresh())
         val key = topicB.send("Smoke run: reply inside the topic.")
@@ -305,6 +311,11 @@ object SmokeMain {
         val replyId = reply?.id ?: 0L
 
         delay(4000) // let A's long-poll deliver both messages
+
+        // B's reply moved B's read marker past A's root: the point everyone has read follows,
+        // and A's live feed (the long-poll with lastCommonReadId) carries it.
+        check("the read-by-everyone point passed A's root once B replied", allA.commonRead.value >= rootId,
+            "commonRead=${allA.commonRead.value} root=$rootId")
 
         val topicMsgs = a.client.threadMessages(token, rootId)
         println("  topic fetch (threadId=$rootId): ${topicMsgs.messages.map { brief(it) }}")

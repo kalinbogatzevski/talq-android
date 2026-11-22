@@ -79,6 +79,7 @@ import talq.app.ui.files.rememberFileUi
 import talq.app.ui.message.ChatItem
 import talq.app.ui.message.DaySeparator
 import talq.app.ui.message.MessageRow
+import talq.app.ui.message.ReadMark
 import talq.app.ui.message.NewMessagesDivider
 import talq.app.ui.message.PendingFileRow
 import talq.app.ui.message.PendingRow
@@ -132,6 +133,9 @@ fun ChatPane(
 
     val state by vm.repo.state.collectAsStateWithLifecycle()
     val liveError by vm.repo.liveError.collectAsStateWithLifecycle()
+    val commonRead by vm.repo.commonRead.collectAsStateWithLifecycle()
+    // The read distinction only where the server gives it and the user shares their own.
+    val showRead = session.capabilities.readStatus && session.capabilities.sharesReadStatus
     val rooms by session.rooms.rooms.collectAsStateWithLifecycle()
     val roomsLoad by session.rooms.state.collectAsStateWithLifecycle()
     val topicList by vm.topics.topics.collectAsStateWithLifecycle()
@@ -358,6 +362,11 @@ fun ChatPane(
                                 MessageRow(
                                     item = item,
                                     session = session,
+                                    readMark = when {
+                                        !item.mine -> null
+                                        showRead && commonRead > 0 && m.id <= commonRead -> ReadMark.Read
+                                        else -> ReadMark.Delivered
+                                    },
                                     showSender = !oneToOne,
                                     topicChip = chip,
                                     highlighted = highlight == m.id,

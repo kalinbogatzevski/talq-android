@@ -1,5 +1,8 @@
 package talq.app.ui.chatlist
 
+import androidx.compose.material3.TextButton
+import talq.app.shift.ErpLink
+import talq.app.Brand
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -93,7 +96,12 @@ fun ChatListScreen(
     val withTopics by session.roomsWithTopics.collectAsStateWithLifecycle()
     // Shift state of colleagues, as the app-level service knows it. Reading only: the
     // service decides by itself when to ask the ERP.
-    val shifts by LocalContext.current.appContainer.shift.statuses.collectAsStateWithLifecycle()
+    val shiftService = LocalContext.current.appContainer.shift
+    val shifts by shiftService.statuses.collectAsStateWithLifecycle()
+    // The branded build expects the phone to be paired with the ERP: say so while it is not.
+    val erpLink by shiftService.link.collectAsStateWithLifecycle()
+    val erpLinkKnown by shiftService.linkKnown.collectAsStateWithLifecycle()
+    val pairReminder = rememberPairReminder()
     val scope = rememberCoroutineScope()
     var pulling by remember { mutableStateOf(false) }
 
@@ -166,6 +174,16 @@ fun ChatListScreen(
                     )
 
                 else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                    val unpaired = erpLink is ErpLink.NotPaired || erpLink is ErpLink.Rejected
+                    if (Brand.isBranded && erpLinkKnown && unpaired && pairReminder.due) {
+                        item(key = "pair") {
+                            PairBanner(
+                                rejected = erpLink is ErpLink.Rejected,
+                                onPair = onOpenSettings,
+                                onLater = pairReminder::snooze,
+                            )
+                        }
+                    }
                     if (error != null) {
                         item(key = "error") { StaleBanner(error.userMessage()) }
                     }
@@ -185,6 +203,57 @@ fun ChatListScreen(
 }
 
 /** The list is old because the last reload failed. Quiet: the data is still useful. */
+/**
+ * The branded build's "this phone is not paired with the ERP" notice: Pair opens Settings
+ * (Shift status), Not now hides it for a week. Without pairing no shift light appears and
+ * nothing else says why.
+ */
+@Composable
+private fun PairBanner(rejected: Boolean, onPair: () -> Unit, onLater: () -> Unit) {
+    val colors = TalqTheme.colors
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(colors.bgSecondary)
+            .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 2.dp),
+    ) {
+        Text("Shift status is off", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+        Text(
+            if (rejected) "The ERP no longer accepts this phone. Pair it again to see who is on shift."
+            else "This phone is not paired with the ERP. Pair it once to see who is on shift.",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.textSecondary,
+            modifier = Modifier.padding(top = 2.dp, end = 8.dp),
+        )
+        Row {
+            TextButton(onClick = onPair) { Text("Pair") }
+            TextButton(onClick = onLater) { Text("Not now", color = colors.textSecondary) }
+        }
+    }
+}
+
+/** "Not now" on the pairing notice, remembered on the phone for a week. */
+private class PairReminder(private val prefs: android.content.SharedPreferences) {
+    var due by mutableStateOf(System.currentTimeMillis() >= prefs.getLong(KEY, 0L))
+        private set
+
+    fun snooze() {
+        prefs.edit().putLong(KEY, System.currentTimeMillis() + WEEK_MILLIS).apply()
+        due = false
+    }
+
+    private companion object {
+        const val KEY = "pair_notice_snoozed_until"
+        const val WEEK_MILLIS = 7L * 24 * 60 * 60 * 1000
+    }
+}
+
+@Composable
+private fun rememberPairReminder(): PairReminder {
+    val context = LocalContext.current
+    return remember { PairReminder(context.applicationContext.getSharedPreferences("notices", android.content.Context.MODE_PRIVATE)) }
+}
+
 @Composable
 private fun StaleBanner(message: String) {
     Text(

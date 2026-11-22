@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3
+
+- **Read status on your own messages**, as in TalQ for desktop: after the time, ○ means
+  delivered and ◉ (in the accent colour) means everyone in the conversation has read it. It
+  follows live while the chat is open. Shown only when your server offers it and you share
+  your own read status (a Talk setting): without that, Talk does not tell anyone how far the
+  others have read, and every message shows ○.
+- **The branded build says when the phone is not paired with the ERP**: a notice at the top
+  of the conversation list ("Shift status is off"), with Pair (opens Settings) and Not now
+  (hides it for a week). It also appears when the ERP no longer accepts the phone.
+
 ## 0.5.2
 
 - Settings showed "Theme" twice: the old fixed line ("Follows the system") from before the

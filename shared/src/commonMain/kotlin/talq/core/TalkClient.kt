@@ -246,6 +246,13 @@ class TalkClient(
         lastKnownMessageId: Long,
         timeoutSeconds: Int = 30,
         limit: Int = 100,
+        /**
+         * The last `X-Chat-Last-Common-Read` received, 0 = not interested. With it the server
+         * answers early (an empty page with the new value) when that point moves, so the read
+         * status of own messages follows live. Always send the LAST value received: a stale
+         * one makes every poll answer at once.
+         */
+        lastCommonReadId: Long = 0,
     ): ChatPage = chatPage(
         ocs(
             HttpMethod.Get, "apps/spreed/api/v1/chat/${seg(token)}",
@@ -257,6 +264,7 @@ class TalkClient(
                 "markNotificationsAsRead" to 0,
                 "includeLastKnown" to 0,
                 "lastKnownMessageId" to lastKnownMessageId,
+                "lastCommonReadId" to lastCommonReadId.takeIf { it > 0 },
             ),
             timeoutMillis = (timeoutSeconds + 20) * 1000L,
             allowNotModified = true,

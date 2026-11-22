@@ -34,6 +34,7 @@ internal class RoomFeed(
     private val _incoming = MutableSharedFlow<List<ChatMessage>>(extraBufferCapacity = 64)
     private val _error = MutableStateFlow<TalkError?>(null)
     private val cursor = MutableStateFlow<Long?>(null)
+    private val _commonRead = MutableStateFlow(0L)
     private val mutex = Mutex()
     private var users = 0
     private var job: Job? = null
@@ -45,6 +46,18 @@ internal class RoomFeed(
     val error: StateFlow<TalkError?> = _error.asStateFlow()
 
     /**
+     * The newest message every participant who shares their read status has read, as the
+     * server last said (0 = unknown, or the user does not share theirs). Taken as given, not
+     * as a maximum: it can move back when someone joins, and the poll must send the server's
+     * own value back or it answers at once forever.
+     */
+    val commonRead: StateFlow<Long> = _commonRead.asStateFlow()
+
+    private fun noteCommonRead(value: Long?) {
+        if (value != null) _commonRead.value = value
+    }
+
+    /**
      * Pin the poll's starting point to the room's newest message. A repository calls this
      * BEFORE it loads its first page: anything that arrives after this point comes through
      * the poll, anything before it is in the page, so nothing falls in between.
@@ -53,7 +66,9 @@ internal class RoomFeed(
         if (cursor.value != null) return
         mutex.withLock {
             if (cursor.value != null) return
-            cursor.value = client.history(token, limit = 1).messages.lastOrNull()?.id ?: 0L
+            val newest = client.history(token, limit = 1)
+            noteCommonRead(newest.lastCommonRead)
+            cursor.value = newest.messages.lastOrNull()?.id ?: 0L
         }
     }
 
@@ -82,8 +97,9 @@ internal class RoomFeed(
         while (scope.isActive) {
             try {
                 val asked = TimeSource.Monotonic.markNow()
-                val page = client.pollMessages(token, from)
+                val page = client.pollMessages(token, from, lastCommonReadId = _commonRead.value)
                 _error.value = null
+                noteCommonRead(page.lastCommonRead)
                 backoff = MIN_BACKOFF
                 // The server's own cursor counts comments this user is not shown (an expired
                 // message, a command reply). Following only the visible ones would leave the

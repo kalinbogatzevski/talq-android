@@ -1,5 +1,7 @@
 package talq.app.ui.message
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import android.text.format.DateFormat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
@@ -141,10 +143,15 @@ fun SystemMessageRow(message: ChatMessage) {
  * images, files, text, time) and the reactions under it.
  */
 @OptIn(ExperimentalFoundationApi::class)
+/** The status of an own message, after its time, as on desktop: delivered ○, read by everyone ◉. */
+enum class ReadMark { Delivered, Read }
+
 @Composable
 fun MessageRow(
     item: ChatItem.Message,
     session: TalkSession,
+    /** Null for other people's messages. */
+    readMark: ReadMark?,
     showSender: Boolean,
     topicChip: TopicChip?,
     highlighted: Boolean,
@@ -217,13 +224,28 @@ fun MessageRow(
                 ) {
                     if (topicChip != null) TopicChipRow(topicChip, onOpenTopic)
                     BubbleBody(m, session, onQuoteClick, onOpenImage, onOpenFile, onLongPress)
-                    Text(
-                        text = clockTime(LocalContext.current, m.timestamp) + if (m.lastEditTimestamp > 0) " · edited" else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontSize = 11.sp,
-                        color = colors.textMuted,
+                    Row(
                         modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
-                    )
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = clockTime(LocalContext.current, m.timestamp) + if (m.lastEditTimestamp > 0) " · edited" else "",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 11.sp,
+                            color = colors.textMuted,
+                        )
+                        if (readMark != null) {
+                            val read = readMark == ReadMark.Read
+                            Text(
+                                text = if (read) "\u25C9" else "\u25CB",
+                                fontSize = 12.sp,
+                                color = if (read) colors.accentText else colors.textMuted,
+                                modifier = Modifier
+                                    .padding(start = 4.dp)
+                                    .semantics { contentDescription = if (read) "Read" else "Delivered" },
+                            )
+                        }
+                    }
                 }
                 if (m.reactions.isNotEmpty()) ReactionChips(m, onReaction)
             }

@@ -80,6 +80,14 @@ class ShiftStatusService(
     private val _link = MutableStateFlow<ErpLink>(ErpLink.NotPaired)
     val link: StateFlow<ErpLink> = _link.asStateFlow()
 
+    private val _linkKnown = MutableStateFlow(false)
+
+    /**
+     * True once the signed-in account's stored pairing has been read. Until then [link] says
+     * NotPaired without meaning it, so nothing may claim "not paired" before this is true.
+     */
+    val linkKnown: StateFlow<Boolean> = _linkKnown.asStateFlow()
+
     private val _notice = MutableStateFlow<String?>(null)
 
     /** Why the last pairing attempt ended without a pairing, for Settings. */
@@ -133,6 +141,7 @@ class ShiftStatusService(
                 Log.w(TAG, "the ERP address could not be read", e)
                 ""
             }
+            var storedRead = true
             val stored = try {
                 store.pairing(key)
             } catch (e: CancellationException) {
@@ -140,6 +149,7 @@ class ShiftStatusService(
             } catch (e: Exception) {
                 // A busy Keystore: no shift light this run, the pairing itself is untouched.
                 Log.w(TAG, "the ERP pairing could not be read", e)
+                storedRead = false
                 null
             }
             account = key
@@ -156,6 +166,8 @@ class ShiftStatusService(
             } else if (stored != null && base != null) {
                 forgetStored(key)
             }
+            // An unreadable store says nothing about the pairing: leave it unknown.
+            _linkKnown.value = storedRead
             session.rooms.rooms.collect { rooms -> observe(rooms.map { it.partnerUserId }) }
         }
     }
@@ -183,6 +195,7 @@ class ShiftStatusService(
         rejected = false
         observed = emptyList()
         _statuses.value = emptyMap()
+        _linkKnown.value = false
         _link.value = ErpLink.NotPaired
         _notice.value = null
         _address.value = ""

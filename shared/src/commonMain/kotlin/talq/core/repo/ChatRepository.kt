@@ -89,6 +89,12 @@ class ChatRepository internal constructor(
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
+    /**
+     * The newest message of the room that everyone (who shares their read status) has read:
+     * an own message with an id up to this is read. 0 = unknown. Live while the room's feed is.
+     */
+    val commonRead: StateFlow<Long> get() = feed.commonRead
+
     private val _createdTopics = MutableStateFlow<Map<String, Long>>(emptyMap())
 
     /**

@@ -1,0 +1,1 @@
+0.5.3: read status on your own messages (○ delivered, ◉ read by everyone), live while the chat is open.

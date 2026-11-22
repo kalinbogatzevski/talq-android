@@ -66,6 +66,20 @@ data class TalkCapabilities(
     /** A file share can carry a caption (`talkMetaData.caption`). */
     val mediaCaption: Boolean get() = has("media-caption")
 
+    /**
+     * Own messages can show whether everyone has read them: the server exposes the last message
+     * read by every participant who shares their read status (`lastCommonReadMessage`,
+     * `X-Chat-Last-Common-Read`).
+     */
+    val readStatus: Boolean get() = has("chat-read-status")
+
+    /**
+     * The user shares their own read status (`config.chat.read-privacy` 0). Only then does the
+     * server tell them how far the others have read; shown only when both hold.
+     */
+    val sharesReadStatus: Boolean
+        get() = (raw.obj("capabilities")?.obj("spreed")?.obj("config")?.obj("chat")?.int("read-privacy") ?: 0) == 0
+
     /** The shared-items endpoints (`/chat/{token}/share...`) exist. */
     val sharedItems: Boolean get() = has("rich-object-list-media")
 

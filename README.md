@@ -18,8 +18,9 @@ yet. See `CHANGELOG.md` for what each version does.
 - **Topics** as a strip of tabs under the top bar, unread ones first; a "Next: topic" button
   when another topic has something new; new topics; per-topic notification level, rename and
   mark as read.
-- **Messages**: formatted text, mentions, replies, reactions, image previews. A message that
-  could not be sent stays visible with Retry.
+- **Messages**: formatted text, mentions, replies, reactions, image previews, and a read mark
+  on your own messages (delivered ○, read by everyone ◉). A message that could not be sent stays
+  visible with Retry.
 - **Files**: send photos, videos and files (photos are shrunk and their location data removed
   unless you send the original); uploads carry on in the background; share into TalQ from
   other apps; open, save and share received files; videos and voice messages play inside the
