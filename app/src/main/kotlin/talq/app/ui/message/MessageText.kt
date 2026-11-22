@@ -56,6 +56,27 @@ data class RichTextColors(
 }
 
 private val URL = Regex("""https?://[^\s<>"']+""")
+private const val ASCII_PUNCTUATION = """!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""
+
+private fun Char.isAsciiPunctuation(): Boolean = this in ASCII_PUNCTUATION
+
+/** [s] with every backslash escape (a backslash before ASCII punctuation) resolved. */
+private fun unescape(s: String): String {
+    if ('\\' !in s) return s
+    val out = StringBuilder(s.length)
+    var i = 0
+    while (i < s.length) {
+        if (s[i] == '\\' && i + 1 < s.length && s[i + 1].isAsciiPunctuation()) {
+            out.append(s[i + 1])
+            i += 2
+        } else {
+            out.append(s[i])
+            i++
+        }
+    }
+    return out.toString()
+}
+
 private const val FENCE = "```"
 
 /**
@@ -174,14 +195,30 @@ private class Inline(
             if (c == 'h' && (s.startsWith("http://", i) || s.startsWith("https://", i))) {
                 val match = URL.matchAt(s.substring(0, end), i)
                 if (match != null) {
-                    val url = match.value.trimEnd('.', ',', ')', ';', ':', '!', '?')
+                    val raw = urlEnd(match.value)
+                    // In markdown an escape inside the link is resolved too: "https://x/\~u" opens https://x/~u.
+                    val url = if (markdown) unescape(raw) else raw
                     flush()
                     link(url) { out.append(url) }
-                    i += url.length
+                    i += raw.length
                     continue
                 }
             }
             if (markdown) {
+                // \[ \* \_ ...: a backslash before ASCII punctuation shows that character as it
+                // is, and it starts nothing (CommonMark "backslash escapes"). Servers escape
+                // typed text this way so it cannot become a link, bold or code. Before "{" only
+                // the backslash goes, so a placeholder still renders.
+                if (c == '\\' && i + 1 < end && s[i + 1].isAsciiPunctuation()) {
+                    val next = s[i + 1]
+                    if (next == '{') {
+                        i++
+                    } else {
+                        plain.append(next)
+                        i += 2
+                    }
+                    continue
+                }
                 // `code`
                 if (c == '`') {
                     val close = s.indexOf('`', i + 1)
@@ -196,10 +233,11 @@ private class Inline(
                 }
                 // [text](url)
                 if (c == '[') {
-                    val mid = s.indexOf("](", i + 1)
-                    val close = if (mid in (i + 2) until end) s.indexOf(')', mid + 2) else -1
+                    val mid = labelEnd(s, i, end)
+                    var close = if (mid in (i + 2) until end && s.startsWith("](", mid)) s.indexOf(')', mid + 2) else -1
+                    while (close in (mid + 2) until end && escaped(s, close, mid + 2)) close = s.indexOf(')', close + 1)
                     if (close in (mid + 3) until end) {
-                        val url = s.substring(mid + 2, close)
+                        val url = unescape(s.substring(mid + 2, close))
                         if (url.startsWith("http://") || url.startsWith("https://")) {
                             flush()
                             link(url) { span(s, i + 1, mid) }
@@ -239,19 +277,77 @@ private class Inline(
         flush()
     }
 
-    /** Index of the closing [marker], or -1. The text between must not start or end with a space. */
+    /** True when `s[at]` is escaped: an odd number of backslashes right before it, from [from] on. */
+    private fun escaped(s: String, at: Int, from: Int): Boolean {
+        var count = 0
+        var j = at - 1
+        while (j >= from && s[j] == '\\') {
+            count++
+            j--
+        }
+        return count % 2 == 1
+    }
+
+    /**
+     * Index of the closing [marker], or -1. The text between must not start or end with a space,
+     * and an escaped marker (`\*`) closes nothing. A marker that can only open (a space before
+     * it, none after: the " *b" of "*a *b*") starts a new emphasis, and the outer one has no
+     * closer, as in CommonMark.
+     */
     private fun closing(s: String, marker: String, from: Int, end: Int): Int {
         if (from >= end || s[from].isWhitespace()) return -1
         var at = s.indexOf(marker, from)
         while (at in from until end) {
-            if (at > from && !s[at - 1].isWhitespace()) {
-                // "*" must not match the first star of "**".
-                if (marker.length == 2 || !(at + 1 < end && s[at + 1] == marker[0])) return at
-                at++
+            if (at > from && !escaped(s, at, from)) {
+                if (!s[at - 1].isWhitespace()) {
+                    // "*" must not match the first star of "**".
+                    if (marker.length == 2 || !(at + 1 < end && s[at + 1] == marker[0])) return at
+                    at++
+                } else if (at + marker.length < end && !s[at + marker.length].isWhitespace()) {
+                    return -1
+                }
             }
             at = s.indexOf(marker, at + 1)
         }
         return -1
+    }
+
+    /**
+     * Index of the "]" that closes the link label opened at [open], or -1: brackets in between
+     * must pair up, and escaped ones (`\]`) count for nothing.
+     */
+    private fun labelEnd(s: String, open: Int, end: Int): Int {
+        var depth = 0
+        var j = open + 1
+        while (j < end) {
+            when (s[j]) {
+                '\\' -> if (j + 1 < end && s[j + 1].isAsciiPunctuation()) j++
+                '[' -> depth++
+                ']' -> if (depth == 0) return j else depth--
+            }
+            j++
+        }
+        return -1
+    }
+
+    /**
+     * How much of a bare link [match] belongs to the link: not trailing punctuation, and in
+     * markdown not a trailing escape either ("\[https://x\]" links https://x, then shows "]").
+     */
+    private fun urlEnd(match: String): String {
+        var url = match
+        while (true) {
+            val trimmed = url.trimEnd('.', ',', ')', ';', ':', '!', '?')
+            val cut = if (markdown && trimmed.length >= 2 && trimmed[trimmed.length - 2] == '\\' &&
+                trimmed.last().isAsciiPunctuation()
+            ) {
+                trimmed.dropLast(2)
+            } else {
+                trimmed
+            }
+            if (cut == url) return url
+            url = cut
+        }
     }
 
     private fun link(url: String, body: () -> Unit) {

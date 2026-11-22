@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.6
+
+- **Escaped characters show without their backslash.** A message whose text was escaped
+  (`\[approved\]`, `\*`, `\_` and the like: servers and bots do this so the text cannot turn
+  into a link, bold or code) now shows `[approved]`, `*`, `_`, as the Talk web app does, and an
+  escaped `*` or `_` no longer starts or ends bold or italic. Links carry no backslash either,
+  in their text or their address: `https://example.com/\~user` opens
+  `https://example.com/~user`, and `\[https://example.com\]` shows the brackets around the link.
+- Two small formatting fixes on the way, again as the Talk web app draws them: in
+  `[a] and [b](https://…)` only "b" is a link (the text in between was swallowed into it), and in
+  `*a *b*` only "b" is italic.
+
 ## 0.5.5
 
 - **A reaction no longer leaves a one-to-one conversation "1 unread".** In a one-to-one
