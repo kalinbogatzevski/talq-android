@@ -8,6 +8,10 @@ own place, draft, unread count and notification level.
 **Status: early (0.5.x).** Chat, topics, files and notifications work; calls are not there
 yet. See `CHANGELOG.md` for what each version does.
 
+**Download:** the APKs are on the [releases page](https://github.com/kalinbogatzevski/talq-android/releases):
+`TalQ-android-<version>.apk`, or `TalQ-android-<version>-foss.apk` without the Google push
+route. Each has a `.sha256` file next to it.
+
 ## What it does
 
 - **Sign in through your browser** (Nextcloud Login Flow v2). TalQ only stores an app
