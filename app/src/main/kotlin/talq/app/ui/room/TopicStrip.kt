@@ -1,5 +1,7 @@
 package talq.app.ui.room
 
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -54,8 +56,10 @@ data class StripChip(
     val tab: RoomTab,
     val title: String,
     val unread: TabUnread = TabUnread(),
-    /** Topic notifications set to Never: its badge is grey. */
+    /** Topic notifications set to Never: a slashed bell after the title, its badge grey. */
     val muted: Boolean = false,
+    /** Topic notifications set to mentions only: a small "@" after the title. */
+    val mentionsOnly: Boolean = false,
 )
 
 /**
@@ -180,6 +184,21 @@ private fun Chip(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 150.dp),
         )
+        // The topic's notification setting, as desktop marks it: a slashed bell for Never,
+        // "@" for mentions only. Nothing for the usual setting.
+        if (chip.muted) {
+            Spacer(Modifier.width(4.dp))
+            Icon(Icons.Outlined.NotificationsOff, contentDescription = "Muted", tint = colors.textMuted, modifier = Modifier.size(14.dp))
+        } else if (chip.mentionsOnly) {
+            Spacer(Modifier.width(4.dp))
+            Text(
+                "@",
+                fontSize = 12.sp,
+                lineHeight = 14.sp,
+                color = colors.textMuted,
+                modifier = Modifier.semantics { contentDescription = "Mentions only" },
+            )
+        }
         // One badge: "@" when mentioned, else the count, else a dot when the count is unknown.
         val badge = chip.unread.badge
         if (badge != null) {

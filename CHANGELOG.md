@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.4
+
+- **Mute a topic with one tap**: while a topic is open, the bell at the top mutes it (its
+  notifications go to Never) or unmutes it again; a message offers Undo. Press and hold a
+  topic for the finer choices (all messages, mentions only) as before.
+- **You can see which topics are muted**: on the topic strip a muted topic shows a slashed
+  bell after its title, and a topic set to mentions only shows "@", as in TalQ for desktop.
+
 ## 0.5.3
 
 - **Read status on your own messages**, as in TalQ for desktop: after the time, ○ means

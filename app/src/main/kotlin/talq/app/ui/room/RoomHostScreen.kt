@@ -1,5 +1,10 @@
 package talq.app.ui.room
 
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material.icons.outlined.NotificationsOff
+import androidx.compose.material.icons.outlined.Notifications
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -195,6 +200,7 @@ fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, o
                         title = info.title.ifBlank { "Untitled topic" },
                         unread = topicUnread(session, unread, lastRead, info),
                         muted = info.attendee.notificationLevel == NotificationLevel.NEVER,
+                        mentionsOnly = info.attendee.notificationLevel == NotificationLevel.MENTION,
                     ),
                 )
             }
@@ -290,6 +296,30 @@ fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, o
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
                 actions = {
+                    // One tap mutes the open topic (Never) or unmutes it (the usual setting);
+                    // the long-press menu keeps the finer levels.
+                    if (openTopic != null) {
+                        val level = openTopic.attendee.notificationLevel
+                        val muted = level == NotificationLevel.NEVER
+                        IconButton(onClick = {
+                            val id = openTopic.id
+                            vm.setNotificationLevel(id, if (muted) NotificationLevel.DEFAULT else NotificationLevel.NEVER)
+                            noticeScope.launch {
+                                val answer = snackbar.showSnackbar(
+                                    message = if (muted) "Topic unmuted" else "Topic muted: it sends no notifications",
+                                    actionLabel = "Undo",
+                                    duration = SnackbarDuration.Short,
+                                )
+                                if (answer == SnackbarResult.ActionPerformed) vm.setNotificationLevel(id, level)
+                            }
+                        }) {
+                            Icon(
+                                if (muted) Icons.Outlined.NotificationsOff else Icons.Outlined.Notifications,
+                                contentDescription = if (muted) "Unmute topic" else "Mute topic",
+                                tint = if (muted) colors.textMuted else LocalContentColor.current,
+                            )
+                        }
+                    }
                     if (hasTopics) {
                         IconButton(onClick = { sheetOpen = true }) {
                             Icon(Icons.AutoMirrored.Outlined.ListAlt, contentDescription = "All topics")

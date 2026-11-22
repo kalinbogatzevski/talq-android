@@ -1,0 +1,1 @@
+0.5.4: mute or unmute the open topic with one tap (the bell at the top, with Undo); muted topics show a slashed bell on the topic strip, mentions-only topics "@".
