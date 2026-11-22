@@ -229,10 +229,6 @@ fun SettingsScreen(
             ShiftSection(context.appContainer.shift)
 
             Divider()
-            SectionLabel("Appearance")
-            SettingRow("Theme", "Follows the system", detail = "Light or dark, whichever your phone is set to.")
-
-            Divider()
             SectionLabel("About")
             SettingRow("$appName for Android", BuildConfig.VERSION_NAME)
 

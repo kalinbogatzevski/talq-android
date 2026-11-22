@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2
+
+- Settings showed "Theme" twice: the old fixed line ("Follows the system") from before the
+  theme choice existed is gone.
+
 ## 0.5.1
 
 - **Themes.** Settings, Appearance, Theme: Ember, Warm and Vivid (dark) and Paper (light),
