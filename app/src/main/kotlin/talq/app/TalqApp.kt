@@ -223,6 +223,7 @@ class AppContainer(context: Context) {
         clearStored()
         shift.signedOut()
         notifyLevels.clear()
+        roomTabs.clearAll()
         pendingDeepLink.value = null
         _sessionState.value = SessionState.SignedOut
     }
@@ -259,6 +260,7 @@ class AppContainer(context: Context) {
                 clearStored()
                 shift.signedOut()
                 notifyLevels.clear()
+                roomTabs.clearAll()
                 session.close()
                 _sessionState.value = SessionState.SignedOut
             }

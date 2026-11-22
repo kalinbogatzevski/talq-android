@@ -3,6 +3,7 @@ package talq.app.push
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.unifiedpush.android.connector.FailedReason
 import org.unifiedpush.android.connector.UnifiedPush
@@ -17,6 +19,7 @@ import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.ResolvedDistributor
 import talq.app.AppContainer
 import talq.app.Brand
+import talq.app.BuildConfig
 import talq.app.SessionState
 import talq.app.ui.common.userMessage
 import talq.core.TalkError
@@ -29,9 +32,13 @@ import talq.core.repo.TalkSession
 import java.time.OffsetDateTime
 
 /**
- * Push through UnifiedPush: a distributor app on the phone holds the connection, the server's
- * notifications app sends Web Push to the distributor's endpoint, and the connector library
- * decrypts it for us.
+ * Push through UnifiedPush: a distributor holds the connection, the server's notifications app
+ * sends Web Push to the distributor's endpoint, and the connector library decrypts it for us.
+ * The distributor is an app such as ntfy, or, in the google variant, Google Play services
+ * through the embedded FCM distributor in this app (our own package name in the list). The
+ * Google route is the default where Play services exist; Settings can switch ([useRoute]).
+ * The route last in use is remembered outside the connector (which forgets its distributor at
+ * every sign-out), so a sign-out does not move anyone from their own choice back to Google.
  *
  * The chain, each step triggered by the one before:
  * 1. [onLoggedIn]: pick a distributor, fetch the server's VAPID key, `UnifiedPush.register`.
@@ -57,6 +64,23 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
     @Volatile
     private var loggingOut = false
 
+    /**
+     * Bumped by every route switch. A registration with the server that started before a switch
+     * and finishes after it may have overwritten the new endpoint with the old one: it then
+     * registers again instead of reporting ([onNewEndpoint]).
+     */
+    @Volatile
+    private var routeGeneration = 0
+
+    /** The route that was in use when it last worked: names it after the connector forgot it. */
+    @Volatile
+    private var lastRoute: String? = null
+
+    private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    private val _routes = MutableStateFlow(PushRoutes())
+    override val routes: StateFlow<PushRoutes> = _routes.asStateFlow()
+
     init {
         TalqNotifications.ensureChannels(appContext)
     }
@@ -71,6 +95,73 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
     override fun retry() {
         container.scope.launch { setUp() }
     }
+
+    override fun refreshRoutes() {
+        container.scope.launch { updateRoutes() }
+    }
+
+    /** Package manager and the connector's database: off the main thread. */
+    private suspend fun updateRoutes() {
+        val routes = withContext(Dispatchers.IO) {
+            val all = try {
+                UnifiedPush.getDistributors(appContext).map { pkg ->
+                    val builtIn = pkg == appContext.packageName
+                    PushRoute(pkg, if (builtIn) GOOGLE_ROUTE else labelOf(pkg), builtIn)
+                }.sortedByDescending { it.builtIn }
+            } catch (e: Exception) {
+                Log.w(TAG, "distributor list failed", e)
+                emptyList()
+            }
+            PushRoutes(all, currentRoute())
+        }
+        _routes.value = routes
+    }
+
+    /** The distributor in use per the connector, or null. Not from the main thread. */
+    private fun currentRoute(): String? = try {
+        UnifiedPush.getAckDistributor(appContext) ?: UnifiedPush.getSavedDistributor(appContext)
+    } catch (e: Exception) {
+        null
+    }
+
+    override fun useRoute(packageName: String) {
+        container.scope.launch {
+            if (withContext(Dispatchers.IO) { currentRoute() } == packageName) return@launch
+            routeGeneration++
+            try {
+                // Makes it the primary distributor and tells the previous one to drop us (the
+                // connector discards that one's answer); the registration below hands the
+                // server the new endpoint, which replaces the old one.
+                withContext(Dispatchers.IO) { UnifiedPush.saveDistributor(appContext, packageName) }
+            } catch (e: Exception) {
+                Log.w(TAG, "switching distributor failed", e)
+                return@launch
+            }
+            remember(packageName)
+            watchdog?.cancel()
+            _status.value = PushStatus.Registering
+            setUp()
+        }
+    }
+
+    /** The user's route, kept across sign-outs (the connector forgets its own at each one). */
+    private fun remember(packageName: String) {
+        lastRoute = packageName
+        prefs.edit().putString(KEY_ROUTE, packageName).apply()
+    }
+
+    private fun labelOf(pkg: String): String = try {
+        val pm = appContext.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+    } catch (e: Exception) {
+        pkg
+    }
+
+    /** Push goes through Google Play services (the distributor built into this app). */
+    private fun viaGoogle(): Boolean = (lastRoute ?: prefs.getString(KEY_ROUTE, null)) == appContext.packageName
+
+    /** Who to name in a message: Google Play services, or the user's push app. */
+    private fun pushApp(): String = if (viaGoogle()) GOOGLE_ROUTE else "Your push app"
 
     override suspend fun onLoggedOut() {
         loggingOut = true
@@ -107,7 +198,9 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
 
     private suspend fun setUp() {
         val session = container.session ?: return
-        if (!chooseDistributor()) {
+        val chosen = withContext(Dispatchers.IO) { chooseDistributor() }
+        updateRoutes()
+        if (!chosen) {
             watchdog?.cancel()
             _status.value = PushStatus.NoDistributor
             return
@@ -132,25 +225,48 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
             UnifiedPush.register(appContext, INSTANCE, null, vapid)
         } catch (e: Exception) {
             Log.w(TAG, "UnifiedPush.register failed", e)
-            return fail(PushStatus.Error("The push app refused the registration."))
+            return fail(PushStatus.Error("${pushApp()} refused the registration."))
         }
-        startWatchdog("Your push app did not answer. Open it once, then try again.")
+        startWatchdog(
+            if (viaGoogle()) "$GOOGLE_ROUTE did not answer. Check the connection, then try again."
+            else "Your push app did not answer. Open it once, then try again.",
+        )
     }
 
     /** True when a distributor is (now) selected. Never shows UI: this runs without an activity. */
     private fun chooseDistributor(): Boolean {
         try {
-            if (UnifiedPush.getAckDistributor(appContext) != null) return true
-            if (UnifiedPush.getSavedDistributor(appContext) != null) return true
+            val inUse = UnifiedPush.getAckDistributor(appContext) ?: UnifiedPush.getSavedDistributor(appContext)
+            if (inUse != null) {
+                remember(inUse)
+                return true
+            }
+            val available = UnifiedPush.getDistributors(appContext)
+            // The route the user had before (kept across sign-outs), if it is still there.
+            val remembered = prefs.getString(KEY_ROUTE, null)
+            if (remembered != null && remembered in available) {
+                UnifiedPush.saveDistributor(appContext, remembered)
+                remember(remembered)
+                return true
+            }
+            // The google variant lists itself when Play services are there: that route needs
+            // nothing else installed, so it is the default. Another app stays selectable.
+            if (BuildConfig.GOOGLE_PUSH && appContext.packageName in available) {
+                UnifiedPush.saveDistributor(appContext, appContext.packageName)
+                remember(appContext.packageName)
+                return true
+            }
             val resolved = UnifiedPush.resolveDefaultDistributor(appContext)
             if (resolved is ResolvedDistributor.Found) {
                 UnifiedPush.saveDistributor(appContext, resolved.packageName)
+                remember(resolved.packageName)
                 return true
             }
             // Several installed and no system default (or none at all): take the first one
             // rather than interrupting with a chooser.
-            val first = UnifiedPush.getDistributors(appContext).firstOrNull() ?: return false
+            val first = available.firstOrNull() ?: return false
             UnifiedPush.saveDistributor(appContext, first)
+            remember(first)
             return true
         } catch (e: Exception) {
             Log.w(TAG, "distributor lookup failed", e)
@@ -166,21 +282,33 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
             val session = awaitSession() ?: return@launch
             val keys = endpoint.pubKeySet
             if (keys == null) {
-                fail(PushStatus.Error("Your push app is too old: it does not support encrypted push."))
+                fail(PushStatus.Error("${pushApp()} is too old: it does not support encrypted push."))
                 return@launch
             }
             _status.value = PushStatus.Registering
+            val generation = routeGeneration
             val result = try {
                 session.client.webPushRegister(endpoint.url, keys.pubKey, keys.auth, APP_TYPES)
             } catch (e: TalkError) {
+                if (generation != routeGeneration) return@launch
                 fail(PushStatus.Error(e.userMessage()))
+                return@launch
+            }
+            if (generation != routeGeneration) {
+                // The route changed while this was on its way: the server may now hold this
+                // (old) endpoint. Register again through the route in use.
+                Log.i(TAG, "push route changed during registration; registering again")
+                setUp()
                 return@launch
             }
             when (result) {
                 is WebPushResult.Ok -> when (result.value) {
                     WebPushRegistration.ALREADY_ACTIVE -> succeed()
                     WebPushRegistration.CREATED_NEEDS_ACTIVATION ->
-                        startWatchdog("The server's test push did not arrive. Check that your push app is running and connected.")
+                        startWatchdog(
+                            if (viaGoogle()) "The server's test push did not arrive through $GOOGLE_ROUTE. Try again in a moment."
+                            else "The server's test push did not arrive. Check that your push app is running and connected.",
+                        )
                 }
                 WebPushResult.Disabled -> fail(PushStatus.ServerDisabled)
                 WebPushResult.Unsupported ->
@@ -195,9 +323,11 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         fail(
             PushStatus.Error(
                 when (reason) {
-                    FailedReason.NETWORK -> "Your push app has no connection right now."
-                    FailedReason.ACTION_REQUIRED -> "Your push app needs attention. Open it and finish its setup."
-                    else -> "Your push app could not register $appName."
+                    FailedReason.NETWORK -> "${pushApp()} has no connection right now."
+                    FailedReason.ACTION_REQUIRED ->
+                        if (viaGoogle()) "$GOOGLE_ROUTE could not register $appName. Check that it is up to date and signed in."
+                        else "Your push app needs attention. Open it and finish its setup."
+                    else -> "${pushApp()} could not register $appName."
                 },
             ),
         )
@@ -206,6 +336,9 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
     /** The distributor dropped us (uninstalled, account removed there, ...). */
     fun onUnregistered() {
         if (loggingOut) return
+        // The connector has already forgotten the route (it unregisters before calling us), so
+        // what was lost is the route last in use.
+        val lost = lastRoute
         container.scope.launch {
             try {
                 container.session?.client?.webPushUnregister()
@@ -215,13 +348,26 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
                 Log.w(TAG, "server unregister failed", e)
             }
             if (container.session == null) return@launch
-            val anyLeft = try {
-                UnifiedPush.getDistributors(appContext).isNotEmpty()
-            } catch (_: Exception) {
-                false
+            val available = withContext(Dispatchers.IO) {
+                try {
+                    UnifiedPush.getDistributors(appContext)
+                } catch (_: Exception) {
+                    emptyList()
+                }
             }
-            // No automatic re-registration: a distributor that keeps refusing would loop.
-            fail(if (anyLeft) PushStatus.Error("Your push app dropped $appName's subscription.") else PushStatus.NoDistributor)
+            val google = appContext.packageName
+            // A push app went away (uninstalled, subscription removed there) and Google Play
+            // services are here: carry on through them. One step only, never back and forth:
+            // a route that keeps refusing must not loop.
+            if (BuildConfig.GOOGLE_PUSH && lost != null && lost != google && google in available) {
+                Log.i(TAG, "push app $lost dropped us; switching to $GOOGLE_ROUTE")
+                prefs.edit().remove(KEY_ROUTE).apply()
+                setUp()
+                return@launch
+            }
+            updateRoutes()
+            val who = if (lost == google) GOOGLE_ROUTE else "Your push app"
+            fail(if (available.isNotEmpty()) PushStatus.Error("$who dropped $appName's subscription.") else PushStatus.NoDistributor)
         }
     }
 
@@ -523,6 +669,7 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
     private fun succeed() {
         watchdog?.cancel()
         _status.value = PushStatus.Active
+        refreshRoutes()
     }
 
     private fun fail(status: PushStatus) {
@@ -539,7 +686,9 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
     }
 
     private fun rejectionMessage(result: WebPushResult.Rejected): String = when (result.reason) {
-        "INVALID_ENDPOINT" -> "The server does not accept your push app's address. It must be a public https address."
+        "INVALID_ENDPOINT" ->
+            if (viaGoogle()) "The server does not accept the $GOOGLE_ROUTE address. Ask the administrator whether it may reach fcm.googleapis.com."
+            else "The server does not accept your push app's address. It must be a public https address."
         "INVALID_ACTIVATION_TOKEN" -> "The server did not accept the test push. Try again."
         "NO_PUSH_SUBSCRIPTION" -> "The server lost the push subscription. Try again."
         else -> "The server refused the push subscription (${result.reason.ifEmpty { result.status.toString() }})."
@@ -560,6 +709,11 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         private const val ROOMS_TIMEOUT_MS = 6_000L
         private const val RECOUNT_TIMEOUT_MS = 2_000L
         private const val ANSWER_TIMEOUT_MS = 60_000L
+        private const val PREFS = "push_route"
+        private const val KEY_ROUTE = "route"
+
+        /** How the built-in route is named in the app. */
+        const val GOOGLE_ROUTE = "Google Play services"
 
         private val MESSAGE_IN_LINK = Regex("#message_(\\d+)")
         private val THREAD_IN_LINK = Regex("[?&]threadId=(\\d+)")

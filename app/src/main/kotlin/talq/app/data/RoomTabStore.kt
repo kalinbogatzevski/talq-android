@@ -68,6 +68,12 @@ class RoomTabStore(context: Context, private val scope: CoroutineScope) {
         write { it.remove(longPreferencesKey(name)) }
     }
 
+    /** Sign-out: every remembered tab goes (the keys name the account and the conversations). */
+    fun clearAll() {
+        cache.value = emptyMap()
+        write { it.clear() }
+    }
+
     private fun write(change: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         scope.launch {
             try {

@@ -4,10 +4,12 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,6 +31,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,6 +83,8 @@ fun SettingsScreen(
     // Re-read on every return to the screen: the user may just have been in system settings.
     LifecycleResumeEffect(Unit) {
         notificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        // An app such as ntfy may have been installed or removed meanwhile.
+        push.refreshRoutes()
         onPauseOrDispose { }
     }
 
@@ -151,6 +156,61 @@ fun SettingsScreen(
                         TextButton(onClick = { push.retry() }) { Text("Try again") }
                     PushStatus.Registering -> Unit
                 }
+            }
+            // Which route delivers push: Google Play services (built in) or an app such as ntfy.
+            val pushRoutes by push.routes.collectAsStateWithLifecycle()
+            val routes = pushRoutes.all
+            val currentRoute = pushRoutes.current
+            var choosingRoute by remember { mutableStateOf(false) }
+            val inUse = routes.firstOrNull { it.packageName == currentRoute }
+            if (inUse != null) {
+                SettingRow(title = "Delivered by", value = inUse.label)
+                if (routes.size > 1) {
+                    Row(Modifier.padding(horizontal = 8.dp)) {
+                        TextButton(onClick = { choosingRoute = true }) { Text("Change") }
+                    }
+                }
+            }
+            if (isHonorOrHuawei()) {
+                Text(
+                    "On this phone, also let $appName start in the background, or notifications stop once it " +
+                        "is swiped away: Settings, Apps, App launch, $appName, Manage manually, all switches on.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textMuted,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
+            if (choosingRoute) {
+                AlertDialog(
+                    onDismissRequest = { choosingRoute = false },
+                    title = { Text("Deliver notifications through") },
+                    text = {
+                        Column {
+                            routes.forEach { route ->
+                                val pick = {
+                                    choosingRoute = false
+                                    push.useRoute(route.packageName)
+                                }
+                                Row(
+                                    Modifier.fillMaxWidth().clickable(onClick = pick).padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    RadioButton(selected = route.packageName == currentRoute, onClick = pick)
+                                    Spacer(Modifier.width(8.dp))
+                                    Column {
+                                        Text(route.label, style = MaterialTheme.typography.bodyLarge)
+                                        Text(
+                                            if (route.builtIn) "Built in: nothing else to install" else "A separate push app",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.textMuted,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = { TextButton(onClick = { choosingRoute = false }) { Text("Close") } },
+                )
             }
 
             Divider()
@@ -315,7 +375,8 @@ private fun describe(status: PushStatus, appName: String): Triple<String, String
     PushStatus.Unknown -> Triple("Not set up", "Messages arrive while $appName is open.", Tone.Neutral)
     PushStatus.NoDistributor -> Triple(
         "No push app",
-        "$appName receives push through a UnifiedPush distributor app, which keeps the connection for it. " +
+        (if (BuildConfig.GOOGLE_PUSH) "This phone has no Google Play services. " else "") +
+            "$appName receives push through a UnifiedPush distributor app, which keeps the connection for it. " +
             "Install one (for example ntfy), open it once, then check again.",
         Tone.Neutral,
     )
@@ -328,6 +389,10 @@ private fun describe(status: PushStatus, appName: String): Triple<String, String
     PushStatus.Active -> Triple("On", "You are notified while $appName is closed.", Tone.Good)
     is PushStatus.Error -> Triple("Not working", status.message, Tone.Bad)
 }
+
+/** Honor and Huawei stop apps in the background unless the user allows it per app. */
+private fun isHonorOrHuawei(): Boolean =
+    Build.MANUFACTURER.equals("HONOR", ignoreCase = true) || Build.MANUFACTURER.equals("HUAWEI", ignoreCase = true)
 
 /** The app's page in the system notification settings (permission and channels). */
 private fun openNotificationSettings(context: Context) {

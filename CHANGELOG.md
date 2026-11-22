@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+- **Notifications without an extra app.** On a phone with Google Play services, notifications
+  now come straight through them: there is nothing else to install. Your server still
+  encrypts every notification end to end; Google carries it without being able to read it,
+  and TalQ uses no Firebase library and no Google account information.
+- **Settings shows how notifications are delivered** ("Delivered by") and can switch between
+  Google Play services and a UnifiedPush app such as ntfy, when one is installed. A phone that
+  already used ntfy keeps it, also after signing out and in again. If the push app you use is
+  removed, notifications carry on through Google Play services by themselves.
+- On Honor and Huawei phones Settings says how to keep notifications coming once the app is
+  swiped away (App launch, Manage manually).
+- **Two variants of the public app**: the standard one with the Google route, and one without
+  it for F-Droid (`-foss`), which uses a UnifiedPush app only. Both have the same app id; one
+  can replace the other only when both are signed with the same key.
+- Signing out now also forgets which tab each conversation was last open on.
+- A privacy policy (`PRIVACY.md`) and store descriptions.
+
 ## 0.4.3
 
 - **A branded build is signed with its own release key** (its file sits next to the public

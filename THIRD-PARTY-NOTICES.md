@@ -1,7 +1,8 @@
 # Third-party notices
 
 TalQ for Android is licensed under the Apache License 2.0 (see `LICENSE`). The app as built
-(`generic` flavor, release runtime classpath) includes the components below. The list is
+(`genericGoogle` variant, release runtime classpath; the `genericFoss` variant built for F-Droid
+is the same minus the UnifiedPush embedded FCM distributor) includes the components below. The list is
 grouped by license and was taken from each component's own published metadata (its Maven
 POM); a release build may leave out parts that R8 found unused.
 
@@ -23,6 +24,7 @@ The full text is in `LICENSE`.
 - **OkHttp** and **Okio** (Square, Inc.)
 - **Coil** (Coil Contributors)
 - **UnifiedPush Android connector** (UnifiedPush contributors)
+- **UnifiedPush embedded FCM distributor** (UnifiedPush contributors; `google` variants only)
 - **Tink** (Google LLC)
 - **Guava**, **Error Prone annotations**, **JSpecify**, **FindBugs JSR-305 annotations**,
   **Accompanist**, **Gson** (Google LLC and contributors)

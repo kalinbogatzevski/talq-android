@@ -1,0 +1,1 @@
+0.5.0: notifications without an extra app on phones with Google Play services (the standard build; the F-Droid build still uses a UnifiedPush app such as ntfy). Settings shows which route delivers them and can switch. A hint for Honor and Huawei phones on keeping notifications coming when the app is swiped away. Store listings and a privacy policy.

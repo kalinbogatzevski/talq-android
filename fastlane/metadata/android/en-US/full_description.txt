@@ -1,0 +1,17 @@
+TalQ is a native client for Nextcloud Talk, built with Kotlin and Jetpack Compose. It is the Android sibling of TalQ for desktop. Topics (Talk's threads) are first-class: each topic is a tab inside its conversation, with its own place, draft, unread count and notification level.
+
+<b>What it does</b>
+<ul>
+<li>Sign in through your browser (Nextcloud Login Flow v2). Only an app password is stored, encrypted with a key held in the Android Keystore, and it is revoked when you sign out (if your server can be reached then).</li>
+<li>Conversations with unread counts, mention markers and presence dots on one-to-one chats.</li>
+<li>Topics as tabs, a "next unread topic" button, new topics, and a notification level per topic.</li>
+<li>Messages with formatting, mentions, replies, reactions and image previews. A message that could not be sent stays with Retry.</li>
+<li>Files: send photos, videos and files (photos shrunk and location removed unless you send the original), uploads in the background, share into TalQ from other apps, in-app video and voice playback, and a Shared files view.</li>
+<li>Notifications through UnifiedPush (for example ntfy) and your server's web push. A muted topic stays silent.</li>
+<li>Optional shift status from your organisation's ERP.</li>
+<li>Light and dark themes that follow the system.</li>
+</ul>
+
+Calls are not there yet.
+
+TalQ is an independent client and is not affiliated with Nextcloud GmbH. It needs a Nextcloud server with Talk.

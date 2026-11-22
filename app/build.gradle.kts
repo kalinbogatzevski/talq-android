@@ -71,8 +71,10 @@ if (brandProblem != null) {
 // storePassword; keyAlias; keyPassword):
 //   generic:  -Ptalq.signing=<file>,      else ~/.talq-android/signing.properties
 //   branded:  -Ptalq.brandSigning=<file>, else ~/.talq-android/<brand folder>/signing.properties
-// A flavor without its file is signed with the local debug key, which is fine for your own use
-// (Android only updates an app from an APK signed with the same key). Debug builds always are.
+// Without its file a generic release APK is left UNSIGNED (for F-Droid or whoever rebuilds it
+// to sign or to compare), and a branded one is signed with the local debug key. Debug builds are
+// always signed with the debug key. Android only updates an app from an APK signed with the
+// same key.
 val talqHome = File(System.getProperty("user.home"), ".talq-android")
 fun propertyFile(name: String): File? = (findProperty(name) as String?)?.trim()?.takeIf { it.isNotEmpty() }?.let { file(it) }
 
@@ -106,8 +108,8 @@ android {
         applicationId = "io.github.kalinbogatzevski.talq"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.4.3"
+        versionCode = 9
+        versionName = "0.5.0"
     }
 
     signingConfigs {
@@ -122,13 +124,21 @@ android {
         }
     }
 
-    flavorDimensions += "brand"
+    // Two dimensions:
+    //   brand: generic (the public app) or branded (an organisation's own app, see above).
+    //   push:  google, where push can also come through Google Play services with no extra app
+    //          (UnifiedPush's embedded FCM distributor: no Firebase SDK, no Google account), or
+    //          foss, push only through a UnifiedPush distributor app such as ntfy. F-Droid builds
+    //          genericFoss; GitHub, Google Play and the branded app use the google variant.
+    flavorDimensions += listOf("brand", "push")
     productFlavors {
         // The public app.
         create("generic") {
             dimension = "brand"
-            // Release builds only: the debug build type keeps its own debug key.
-            signingConfig = signingConfigs.getByName(if ("genericRelease" in releaseKeys) "genericRelease" else "debug")
+            // Release builds only: the debug build type keeps its own debug key. Without the
+            // release key a generic release APK is left unsigned, for whoever rebuilds it
+            // (F-Droid) to sign or to compare with the published one.
+            signingConfig = if ("genericRelease" in releaseKeys) signingConfigs.getByName("genericRelease") else null
             buildConfigField("boolean", "IS_BRANDED", "false")
             buildConfigField("String", "BRAND_SERVER_URL", quoted(""))
             buildConfigField("String", "BRAND_ERP_BASE_URL", quoted(""))
@@ -145,6 +155,14 @@ android {
             buildConfigField("String", "BRAND_ERP_BASE_URL", quoted(brandValue("erpBaseUrl")))
             buildConfigField("String", "BRAND_SHORT_NAME", quoted(brandValue("shortName")))
         }
+        create("google") {
+            dimension = "push"
+            buildConfigField("boolean", "GOOGLE_PUSH", "true")
+        }
+        create("foss") {
+            dimension = "push"
+            buildConfigField("boolean", "GOOGLE_PUSH", "false")
+        }
     }
     // Flavor resources win over main: the store's res/ replaces the icons and app_name.
     if (brandProblem == null && brandDir != null) {
@@ -154,13 +172,17 @@ android {
     buildTypes {
         // The build to hand out: shrunk (R8 drops unused code and resources, which takes the
         // APK from about 32 MB to under 4 MB) and not debuggable, so it also runs faster.
-        // Signed per flavor (see "Release signing" above): each with its own release key when
-        // there is one, else with the local debug key (AGP creates one on first use). Android only updates an installed app from an APK signed with the same key, so
-        // a self-built APK cannot update one built elsewhere: uninstall that first (which signs
-        // you out).
+        // Signed per brand (see "Release signing" above): each with its own release key when
+        // there is one; without it generic stays unsigned and branded takes the local debug key
+        // (AGP creates one on first use). Android only updates an installed app from an APK
+        // signed with the same key, so a self-built APK cannot update one built elsewhere:
+        // uninstall that first (which signs you out).
         // mapping.txt (app/build/outputs/mapping/<variant>/) decodes its stack traces: keep it
         // with every APK you hand out.
         release {
+            // No git revision stamped into the APK: the same source then builds the same bytes
+            // from any checkout (a clone at a tag, a worktree, F-Droid's build server).
+            vcsInfo.include = false
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -174,20 +196,30 @@ android {
         compose = true
         buildConfig = true
     }
+    // The dependency list AGP would put into the APK is encrypted for Google Play only, and
+    // F-Droid's scanner rejects such a blob. App bundles (Play) keep it.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = true
+    }
 }
 
 androidComponents {
     beforeVariants(selector().withFlavor("brand" to "branded")) { variant ->
-        variant.enable = brandProblem == null
+        // The branded app always has the Google route; it is never built for F-Droid.
+        variant.enable = brandProblem == null && variant.productFlavors.none { it.second == "foss" }
     }
-    // APK names: generic TalQ-android-<version>.apk, branded <apkName>-<version>.apk (each
-    // variant has its own output folder, so debug and release share the name).
+    // APK names: TalQ-android-<version>.apk (generic, google), TalQ-android-<version>-foss.apk
+    // (generic, foss), <apkName>-<version>.apk (branded). Each variant has its own output
+    // folder, so debug and release share the name.
     onVariants { variant ->
-        val stem = if (variant.productFlavors.any { it.second == "branded" }) brandValue("apkName") else "TalQ-android"
+        val flavors = variant.productFlavors.map { it.second }
+        val stem = if ("branded" in flavors) brandValue("apkName") else "TalQ-android"
+        val suffix = if ("foss" in flavors) "-foss" else ""
         variant.outputs.forEach { output ->
             val named = output as? VariantOutputImpl
                 ?: throw GradleException("The APK naming in app/build.gradle.kts needs updating for this Android Gradle Plugin.")
-            named.outputFileName.set(output.versionName.map { "$stem-$it.apk" })
+            named.outputFileName.set(output.versionName.map { "$stem-$it$suffix.apk" })
         }
     }
 }
@@ -211,6 +243,8 @@ dependencies {
     implementation(libs.datastore.preferences)
     implementation(libs.androidx.browser)
     implementation(libs.unifiedpush.connector)
+    // Push through Google Play services without an extra app: google variants only.
+    "googleImplementation"(libs.unifiedpush.embedded.fcm)
     implementation(libs.work.runtime.ktx)
     implementation(libs.exifinterface)
     implementation(libs.media3.exoplayer)
