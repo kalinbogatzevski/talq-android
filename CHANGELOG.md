@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.5
+
+- **A reaction no longer leaves a one-to-one conversation "1 unread".** In a one-to-one
+  conversation Talk counts a reaction to your message as an unread entry (and shows it as the
+  last message); reading the chat to the bottom now counts it as read too, also when the
+  reaction arrives while the chat is open. A conversation stuck at "1" this way clears the next
+  time you open it.
+
 ## 0.5.4
 
 - **Mute a topic with one tap**: while a topic is open, the bell at the top mutes it (its

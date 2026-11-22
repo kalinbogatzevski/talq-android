@@ -1,5 +1,10 @@
 package talq.core.smoke
 
+import io.ktor.http.HttpMethod
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonPrimitive
+import talq.core.net.asObject
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -264,6 +269,39 @@ object SmokeMain {
         a.close()
     }
 
+    /**
+     * In a ONE-TO-ONE room Talk turns a reaction into the room's last message and counts it as
+     * unread (a group room does neither; seen live 2026-11-22). Reading up to the newest visible
+     * message must still clear it. Uses the bots' own one-to-one conversation.
+     */
+    private suspend fun directReactionCheck(a: TalkSession, b: TalkSession) {
+        println("\n== WRITE: a reaction in a one-to-one room does not stay unread")
+        val dm = a.client.ocs(
+            HttpMethod.Post, "apps/spreed/api/v4/room",
+            body = buildJsonObject { put("roomType", 1); put("invite", b.user.userId) },
+        ).data.asObject()?.get("token")?.jsonPrimitive?.content.orEmpty()
+        check("bots' one-to-one room", dm.isNotEmpty())
+        if (dm.isEmpty()) return
+        val mine = a.client.sendMessage(dm, "Smoke run: a message to react to.")
+        a.client.markRead(dm, mine.id)
+        b.client.addReaction(dm, mine.id, "🎉")
+        delay(1000)
+        a.rooms.refresh()
+        val before = a.rooms.room(dm)
+        check("the reaction counts as unread in a one-to-one room (the server's behaviour)",
+            before?.unreadMessages == 1 && before.lastMessage?.isSystem == true,
+            "unread=${before?.unreadMessages} last=${before?.lastMessage?.systemMessage}")
+        // What the app does when the chat is open at the bottom: the newest VISIBLE message is
+        // A's own one (the reaction is folded into it).
+        val tracker = a.unread(dm)
+        tracker.refresh()
+        tracker.markSeen(ChatScope.All, mine.id)
+        a.rooms.refresh()
+        val after = a.rooms.room(dm)
+        check("reading to the bottom clears a reaction-only unread", after?.unreadMessages == 0,
+            "unread=${after?.unreadMessages} lastRead=${after?.lastReadMessage} last=${after?.lastMessage?.id}")
+    }
+
     private suspend fun writeChecks(a: TalkSession, credsB: Credentials, token: String) {
         println("\n== WRITE: topic round trip in $token")
         val b = TalkSession.open(credsB)
@@ -383,6 +421,7 @@ object SmokeMain {
 
         check("mark read", allA.markRead())
         allA.stop(); generalA.stop()
+        directReactionCheck(a, b)
         b.close()
     }
 

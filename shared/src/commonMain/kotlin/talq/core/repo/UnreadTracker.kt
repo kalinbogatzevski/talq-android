@@ -216,6 +216,10 @@ class UnreadTracker internal constructor(
         }
         remember(scope, upTo)
         if (!_state.value.complete) extend()
+        // The rooms list knows a newer entry than any scan has seen: look at it before deciding
+        // what may be marked read (it may be a message nobody has seen yet).
+        val last = session.rooms.room(token)?.lastMessage
+        if (last != null && last.id > scanMutex.withLock { top }) refresh()
         val s = _state.value
         // Unread messages older than what was scanned may sit in another topic: don't skip them.
         if (!s.complete && scope != ChatScope.All) return
@@ -223,6 +227,15 @@ class UnreadTracker internal constructor(
         // Only ids known to be messages of this room are sent as the marker.
         var target = if (upTo < firstLive) upTo else 0L
         for (e in s.entries) if (e.id < firstLive && e.id > target) target = e.id
+        // Nothing unread is left anywhere: the room's last entry may be passed too when it is not
+        // a message to read (a reaction, a system notice, an own message). In a one-to-one room
+        // Talk makes a reaction the last message and counts it as unread; without this the
+        // conversation stays "1 unread" after it was read to the bottom (seen live 2026-11-22).
+        if (firstLive == Long.MAX_VALUE && last != null && last.id > target && !countable(last) &&
+            last.id <= scanMutex.withLock { top }
+        ) {
+            target = last.id
+        }
         if (target <= marker()) return
         try {
             client.markRead(token, target)

@@ -99,10 +99,19 @@ class ChatViewModel(
         replyTo = null
     }
 
-    /** The newest message is on screen: count it read here and, as far as allowed, on the server. */
-    fun onReachedBottom(newestId: Long) {
-        if (newestId <= seenUpTo) return
-        seenUpTo = newestId
+    /** The newest entry of the room the last [onReachedBottom] passed on (see there). */
+    private var seenRoomLast = 0L
+
+    /**
+     * The newest message is on screen: count it read here and, as far as allowed, on the server.
+     * [roomLastId] is the room's last entry as the conversation list says: a reaction or system
+     * notice arriving while the chat is open at the bottom changes only that (the visible newest
+     * message stays the same), and in a one-to-one room Talk counts it as unread.
+     */
+    fun onReachedBottom(newestId: Long, roomLastId: Long = 0L) {
+        if (newestId <= seenUpTo && roomLastId <= seenRoomLast) return
+        seenRoomLast = maxOf(seenRoomLast, roomLastId)
+        if (newestId > seenUpTo) seenUpTo = newestId
         // On the session's lifetime, not this view's: leaving right after reading must still count.
         session.launch { unread.markSeen(scope, newestId) }
     }

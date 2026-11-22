@@ -1,0 +1,1 @@
+0.5.5: a reaction no longer leaves a one-to-one conversation marked 1 unread after you have read it.

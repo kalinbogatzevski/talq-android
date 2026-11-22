@@ -264,11 +264,13 @@ fun ChatPane(
         derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 48 }
     }
     val newestId = state.messages.lastOrNull()?.id ?: 0L
+    // The room's last entry per the conversation list: also a reaction or a system notice.
+    val roomLastId = rooms.firstOrNull { it.token == vm.token }?.lastMessage?.id ?: 0L
 
     // Reading = the newest message is on screen while the app is in front.
-    LaunchedEffect(vm, lifecycleOwner, newestId, atBottom, positioned, readingEnabled) {
+    LaunchedEffect(vm, lifecycleOwner, newestId, roomLastId, atBottom, positioned, readingEnabled) {
         if (!readingEnabled || !positioned || !atBottom || newestId == 0L) return@LaunchedEffect
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) { vm.onReachedBottom(newestId) }
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) { vm.onReachedBottom(newestId, roomLastId) }
     }
 
     // Stay at the bottom when something new arrives there, and always follow our own messages.
