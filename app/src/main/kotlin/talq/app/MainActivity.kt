@@ -5,8 +5,11 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import talq.app.nav.DeepLink
 import talq.app.nav.TalqRoot
+import talq.app.theme.ThemedSystemBars
 import talq.app.theme.TalqTheme
 
 class MainActivity : ComponentActivity() {
@@ -16,7 +19,9 @@ class MainActivity : ComponentActivity() {
         // Only a fresh start carries a new deep link; a rotation would replay the old one.
         if (savedInstanceState == null) handleDeepLink(intent)
         setContent {
-            TalqTheme {
+            val theme by appContainer.appearance.theme.collectAsStateWithLifecycle()
+            TalqTheme(theme) {
+                ThemedSystemBars(this, TalqTheme.colors.isLight)
                 TalqRoot(appContainer)
             }
         }

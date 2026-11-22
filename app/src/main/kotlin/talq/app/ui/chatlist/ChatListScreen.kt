@@ -210,7 +210,7 @@ private fun RoomRow(
 ) {
     val colors = TalqTheme.colors
     val context = LocalContext.current
-    val dark = isSystemInDarkTheme()
+    val dark = !TalqTheme.colors.isLight
     val muted = room.notificationLevel == NotificationLevel.NEVER
     val unread = room.unreadMessages > 0
     // The newest unread message sits in a topic: name the topic as a pill that opens it.

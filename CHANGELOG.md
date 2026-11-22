@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- **Themes.** Settings, Appearance, Theme: Ember, Warm and Vivid (dark) and Paper (light),
+  the four of TalQ for desktop, or "Follow phone" (Vivid when the phone is dark, Paper when it
+  is light), which stays the default. The choice applies at once, also on the share screen, and
+  the status bar icons follow it. It belongs to the phone, not to the account: signing out
+  keeps it.
+
 ## 0.5.0
 
 - **Notifications without an extra app.** On a phone with Google Play services, notifications

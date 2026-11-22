@@ -9,7 +9,12 @@ import android.provider.Settings
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,6 +59,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import talq.app.Brand
 import talq.app.BuildConfig
 import talq.app.appContainer
+import talq.app.data.ThemeChoice
+import talq.app.theme.colorsFor
 import talq.app.appName
 import talq.app.push.PushRegistrar
 import talq.app.push.PushStatus
@@ -107,7 +114,7 @@ fun SettingsScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Avatar(
-                    url = session.client.userAvatarUrl(session.user.userId, 128, isSystemInDarkTheme()),
+                    url = session.client.userAvatarUrl(session.user.userId, 128, !TalqTheme.colors.isLight),
                     authorization = session.client.authorizationHeader,
                     name = session.user.displayName.ifEmpty { session.user.userId },
                     size = 52.dp,
@@ -123,6 +130,10 @@ fun SettingsScreen(
             }
             SettingRow("Server", session.client.serverUrl.removePrefix("https://"))
             SettingRow("Talk version", session.capabilities.talkVersion.ifEmpty { "unknown" })
+
+            Divider()
+            SectionLabel("Appearance")
+            AppearanceSection()
 
             Divider()
             SectionLabel("Notifications")
@@ -340,6 +351,60 @@ private fun ShiftSection(shift: ShiftStatusService) {
                 TextButton(onClick = { shift.unpair() }) { Text("Unpair") }
             }
         }
+    }
+}
+
+/** The theme: the four of desktop TalQ, or following the phone's light/dark setting. */
+@Composable
+private fun AppearanceSection() {
+    val appearance = LocalContext.current.appContainer.appearance
+    val theme by appearance.theme.collectAsStateWithLifecycle()
+    var choosing by remember { mutableStateOf(false) }
+    SettingRow(title = "Theme", value = theme.label, detail = theme.description)
+    Row(Modifier.padding(horizontal = 8.dp)) {
+        TextButton(onClick = { choosing = true }) { Text("Change") }
+    }
+    if (choosing) {
+        AlertDialog(
+            onDismissRequest = { choosing = false },
+            title = { Text("Theme") },
+            text = {
+                Column {
+                    ThemeChoice.entries.forEach { choice ->
+                        val pick = {
+                            choosing = false
+                            appearance.setTheme(choice)
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().clickable(onClick = pick).padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = choice == theme, onClick = pick)
+                            Spacer(Modifier.width(8.dp))
+                            ThemeSwatch(choice)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(choice.label, style = MaterialTheme.typography.bodyLarge)
+                                Text(choice.description, style = MaterialTheme.typography.bodySmall, color = TalqTheme.colors.textMuted)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { choosing = false }) { Text("Close") } },
+        )
+    }
+}
+
+/** A small disc in the theme's ground with its accent in the middle. */
+@Composable
+private fun ThemeSwatch(choice: ThemeChoice) {
+    val c = colorsFor(choice)
+    Box(
+        Modifier.size(28.dp).background(c.bgPrimary, CircleShape).border(1.dp, TalqTheme.colors.divider, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(10.dp).background(c.accent, CircleShape))
     }
 }
 

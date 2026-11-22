@@ -7,7 +7,11 @@ import androidx.compose.ui.graphics.Color
 /**
  * TalQ's palette, ported from TalQ for desktop's design system (same author, Apache-2.0:
  * github.com/kalinbogatzevski/talq-desktop, src/painter/PainterTheme.cpp).
- * Dark = "Vivid", light = "Paper". Warm grounds, one teal signal, no cool grays.
+ * Four themes as on desktop: Ember, Warm and Vivid (dark) and Paper (light); following the
+ * phone picks Vivid or Paper. Warm grounds, one teal signal, no cool grays. The base colours are
+ * desktop's verbatim; Ember's and Warm's derived ones (accent as text, the soft chip tint, the
+ * author inks) were computed with desktop's contrast rules and checked to clear 4.5:1 wherever
+ * Vivid does.
  * Every pair that carries text was tuned for WCAG AA on desktop; keep the values together.
  */
 @Immutable
@@ -84,6 +88,66 @@ val VividColors = TalqColors(
     authorInks = listOf(
         Color(0xFF21E3C8), Color(0xFFE07060), Color(0xFFF0A050), Color(0xFF5EC76A),
         Color(0xFFA98CDD), Color(0xFFE87AAE), Color(0xFF50B8C8), Color(0xFF5A9ECF),
+    ),
+)
+
+val EmberColors = TalqColors(
+    isLight = false,
+    bgPrimary = Color(0xFF221C16),
+    bgSidebar = Color(0xFF1D1813),
+    bgSecondary = Color(0xFF281F18),
+    bgSurface = Color(0xFF322820),
+    bgSelected = Color(0xFF382C1F),
+    bgHover = Color(0xFF2B221A),
+    bgMessageOwn = Color(0xFF18312D),
+    divider = Color(0xFF3A3027),
+    textPrimary = Color(0xFFF6F1E8),
+    textSecondary = Color(0xFFB4AB9C),
+    textMuted = Color(0xFFA1988B),
+    accent = Color(0xFF1AC2AF),
+    controlInk = Color(0xFF0E1817),
+    accentText = Color(0xFF1AC2AF),
+    accentSoft = Color(0xFF253C33),
+    accentSoftInk = Color(0xFF1AC2AF),
+    amber = Color(0xFFF3A948),
+    online = Color(0xFF5FCE72),
+    danger = Color(0xFFEC8A64),
+    mention = Color(0xFF14B8A6),
+    link = Color(0xFF62A3D1),
+    codeBg = Color(0xFF16110D),
+    authorInks = listOf(
+        Color(0xFF1AC2AF), Color(0xFFE27868), Color(0xFFF0A050), Color(0xFF5EC76A),
+        Color(0xFFA488D8), Color(0xFFE87AAE), Color(0xFF50B8C8), Color(0xFF5A9ECF),
+    ),
+)
+
+val WarmColors = TalqColors(
+    isLight = false,
+    bgPrimary = Color(0xFF241D15),
+    bgSidebar = Color(0xFF1F1812),
+    bgSecondary = Color(0xFF2C2318),
+    bgSurface = Color(0xFF382C1D),
+    bgSelected = Color(0xFF3F311E),
+    bgHover = Color(0xFF2E2418),
+    bgMessageOwn = Color(0xFF17332D),
+    divider = Color(0xFF43372A),
+    textPrimary = Color(0xFFF7F1E6),
+    textSecondary = Color(0xFFBCAE99),
+    textMuted = Color(0xFFA99E8B),
+    accent = Color(0xFF1ECDB6),
+    controlInk = Color(0xFF0E1817),
+    accentText = Color(0xFF1ECDB6),
+    accentSoft = Color(0xFF294134),
+    accentSoftInk = Color(0xFF1ECDB6),
+    amber = Color(0xFFF6AD3E),
+    online = Color(0xFF61D36F),
+    danger = Color(0xFFF08A62),
+    mention = Color(0xFF14B8A6),
+    link = Color(0xFF62A3D1),
+    codeBg = Color(0xFF17120C),
+    authorInks = listOf(
+        Color(0xFF1ECDB6), Color(0xFFE47F71), Color(0xFFF0A050), Color(0xFF5EC76A),
+        Color(0xFFAA8FDB), Color(0xFFE87AAE), Color(0xFF50B8C8), Color(0xFF62A3D2),
     ),
 )
 

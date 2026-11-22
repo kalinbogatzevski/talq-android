@@ -251,7 +251,7 @@ fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, o
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (direct != null) {
                             StatusAvatar(
-                                url = session.client.roomAvatarUrl(token, direct.avatarVersion, isSystemInDarkTheme()),
+                                url = session.client.roomAvatarUrl(token, direct.avatarVersion, !TalqTheme.colors.isLight),
                                 authorization = session.client.authorizationHeader,
                                 name = roomName,
                                 ring = MaterialTheme.colorScheme.surface,
@@ -261,7 +261,7 @@ fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, o
                             )
                         } else {
                             Avatar(
-                                url = session.client.roomAvatarUrl(token, room?.avatarVersion ?: "", isSystemInDarkTheme()),
+                                url = session.client.roomAvatarUrl(token, room?.avatarVersion ?: "", !TalqTheme.colors.isLight),
                                 authorization = session.client.authorizationHeader,
                                 name = roomName,
                                 size = 36.dp,

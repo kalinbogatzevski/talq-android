@@ -35,7 +35,7 @@ yet. See `CHANGELOG.md` for what each version does.
   shift, on a break or off shift. You pair the phone once in your browser; the key is stored
   encrypted and only ever sent to that ERP, over https. With no ERP address set in Settings
   nothing about shifts is shown or sent.
-- Light and dark themes that follow the system.
+- Four themes, as on desktop (Ember, Warm, Vivid, Paper), or following the phone's light/dark setting.
 
 Android 8.0 (API 26) or newer.
 

@@ -1,5 +1,7 @@
 package talq.app.theme
 
+import talq.app.data.ThemeChoice
+
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
@@ -105,9 +107,19 @@ private val TalqShapes = Shapes(
     extraLarge = RoundedCornerShape(20.dp),
 )
 
+/** The colours for [choice]; following the phone means Vivid when it is dark, Paper when it is light. */
 @Composable
-fun TalqTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
-    val colors = if (dark) VividColors else PaperColors
+fun colorsFor(choice: ThemeChoice): TalqColors = when (choice) {
+    ThemeChoice.System -> if (isSystemInDarkTheme()) VividColors else PaperColors
+    ThemeChoice.Ember -> EmberColors
+    ThemeChoice.Warm -> WarmColors
+    ThemeChoice.Vivid -> VividColors
+    ThemeChoice.Paper -> PaperColors
+}
+
+@Composable
+fun TalqTheme(choice: ThemeChoice = ThemeChoice.System, content: @Composable () -> Unit) {
+    val colors = colorsFor(choice)
     CompositionLocalProvider(LocalTalqColors provides colors) {
         MaterialTheme(
             colorScheme = colors.toScheme(),

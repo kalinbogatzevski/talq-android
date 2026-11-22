@@ -28,6 +28,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import talq.app.badge.BadgeRefreshWorker
 import talq.app.badge.UnreadBadge
+import talq.app.data.AppearanceStore
 import talq.app.data.KeystoreCredentialStore
 import talq.app.data.NotifyLevelStore
 import talq.app.data.RoomTabStore
@@ -88,6 +89,9 @@ class AppContainer(context: Context) {
 
     /** Notification levels of conversations and topics, kept for the push handler (see [NotifyLevelStore]). */
     val notifyLevels = NotifyLevelStore(appContext)
+
+    /** How the app looks on this phone (theme); not tied to an account. */
+    val appearance = AppearanceStore(appContext)
 
     /** Whether a notification may be shown: a muted conversation or topic shows nothing. */
     val gate = NotificationGate(appContext, notifyLevels) { session }

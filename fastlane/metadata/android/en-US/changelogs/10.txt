@@ -1,0 +1,1 @@
+0.5.1: themes. Settings, Appearance, Theme: Ember, Warm, Vivid or Paper, the four of TalQ for desktop, or Follow phone (the default). Applies at once; the status bar follows it.

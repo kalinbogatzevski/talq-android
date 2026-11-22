@@ -1,5 +1,6 @@
 package talq.app.files
 
+import talq.app.theme.ThemedSystemBars
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
@@ -93,7 +94,9 @@ class ShareActivity : ComponentActivity() {
         enableEdgeToEdge()
         vm.begin(intent)
         setContent {
-            TalqTheme {
+            val theme by appContainer.appearance.theme.collectAsStateWithLifecycle()
+            TalqTheme(theme) {
+                ThemedSystemBars(this, TalqTheme.colors.isLight)
                 ShareScreen(
                     vm = vm,
                     onOpenApp = {
@@ -388,7 +391,7 @@ private fun ShareRoomRow(session: TalkSession, room: Room, onClick: () -> Unit) 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Avatar(
-            url = session.client.roomAvatarUrl(room.token, room.avatarVersion, isSystemInDarkTheme()),
+            url = session.client.roomAvatarUrl(room.token, room.avatarVersion, !TalqTheme.colors.isLight),
             authorization = session.client.authorizationHeader,
             name = room.displayName,
             size = 44.dp,
