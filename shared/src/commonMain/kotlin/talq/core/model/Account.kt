@@ -80,6 +80,20 @@ data class TalkCapabilities(
     val sharesReadStatus: Boolean
         get() = (raw.obj("capabilities")?.obj("spreed")?.obj("config")?.obj("chat")?.int("read-privacy") ?: 0) == 0
 
+    /** A ringing phone can ask whether to keep ringing (`GET call/{token}/notification-state`). */
+    val callNotificationState: Boolean get() = has("call-notification-state-api")
+
+    /**
+     * `config.call.recording-consent`: 0 never asked, 1 always required, 2 per conversation.
+     * When required, joining a call without consent answers 400.
+     */
+    val recordingConsent: Int
+        get() = raw.obj("capabilities")?.obj("spreed")?.obj("config")?.obj("call")?.int("recording-consent") ?: 0
+
+    /** `config.call.enabled`: calls are switched on for this user (true when the server says nothing). */
+    val callsEnabled: Boolean
+        get() = raw.obj("capabilities")?.obj("spreed")?.obj("config")?.obj("call")?.bool("enabled", true) ?: true
+
     /** The shared-items endpoints (`/chat/{token}/share...`) exist. */
     val sharedItems: Boolean get() = has("rich-object-list-media")
 

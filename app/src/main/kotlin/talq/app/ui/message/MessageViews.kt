@@ -43,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +66,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,6 +78,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import talq.app.theme.AvatarFills
 import talq.app.theme.TalqTheme
+import talq.app.ui.adaptive.LocalTwoPane
 import talq.app.ui.common.Avatar
 import talq.app.ui.common.authorizedImage
 import talq.app.ui.common.userMessage
@@ -92,7 +95,10 @@ data class TopicChip(val id: Long, val title: String, /** Set on the topic's fir
 fun topicColor(topicId: Long): Color = AvatarFills[((topicId % AvatarFills.size).toInt() + AvatarFills.size) % AvatarFills.size]
 
 private val AvatarSize = 32.dp
-private val BubbleMaxWidth = 310.dp
+/** How wide a bubble may get: wider in a tablet's conversation pane than on a phone. */
+@Composable
+@ReadOnlyComposable
+internal fun bubbleMaxWidth(): Dp = if (LocalTwoPane.current) 480.dp else 310.dp
 
 fun clockTime(context: android.content.Context, timestamp: Long): String =
     Instant.ofEpochSecond(timestamp).atZone(ZoneId.systemDefault()).format(
@@ -196,7 +202,7 @@ fun MessageRow(
                 Spacer(Modifier.width(40.dp))
             }
             Column(
-                modifier = Modifier.weight(1f, fill = false).widthIn(max = BubbleMaxWidth),
+                modifier = Modifier.weight(1f, fill = false).widthIn(max = bubbleMaxWidth()),
                 horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
             ) {
                 if (!mine && showSender && item.startsGroup) {
@@ -383,10 +389,10 @@ private fun QuoteBlock(quoted: ChatMessage, onClick: () -> Unit, onLongPress: ()
     }
 }
 
-/** One line that stands for a message in previews and quotes. */
+/** One line that stands for a message in previews and quotes: what the bubble says, unstyled. */
 fun previewText(m: ChatMessage): String = when {
     m.deleted -> "Message deleted"
-    else -> m.plainText.replace('\n', ' ').trim().ifEmpty { m.files.firstOrNull()?.name ?: "" }
+    else -> plainPreview(m.message, m.parameters, m.markdown, m.isSystem).ifEmpty { m.files.firstOrNull()?.name ?: "" }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -459,7 +465,7 @@ fun PendingRow(outbox: OutboxMessage, onRetry: () -> Unit, onDiscard: () -> Unit
     ) {
         Column(
             modifier = Modifier
-                .widthIn(max = BubbleMaxWidth)
+                .widthIn(max = bubbleMaxWidth())
                 .alpha(if (failed) 1f else 0.6f)
                 .clip(RoundedCornerShape(14.dp))
                 .background(colors.bgMessageOwn)

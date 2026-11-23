@@ -14,6 +14,10 @@ data object ChatListRoute
 @Serializable
 data object SettingsRoute
 
+/** Settings > Diagnostics: connection checks and the report for support. */
+@Serializable
+data object DiagnosticsRoute
+
 /**
  * An open conversation: one back-stack entry, whatever tab is showing inside it.
  *

@@ -21,8 +21,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
+import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.PermMedia
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -40,6 +42,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
@@ -57,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import talq.app.appContainer
+import talq.app.call.CallActivity
 import talq.app.nav.RoomRoute
 import talq.app.theme.TalqTheme
 import talq.app.ui.chat.ChatPane
@@ -90,15 +94,42 @@ private const val PRESENCE_REFRESH_MILLIS = 30_000L
  * screen (one live feed across all tab switches, and General/topics have something to show at
  * once), and reloads rooms, topics and unread counts each time it comes to the front.
  */
+/**
+ * Asked from outside the open conversation [token] (the wide layout's list, a notification,
+ * "Show in chat"): switch to [tab] (null: stay) and scroll to [messageId] there (null: none).
+ */
+data class TabRequest(val token: String, val tab: RoomTab?, val messageId: Long? = null)
+
+/**
+ * [showBack] false: no back arrow (beside the conversation list, which is already on screen).
+ * A [tabRequest] for this room is applied once, then [onTabRequestDone] is called.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, onOpenSharedFiles: () -> Unit) {
+fun RoomHostScreen(
+    session: TalkSession,
+    route: RoomRoute,
+    onBack: () -> Unit,
+    onOpenSharedFiles: () -> Unit,
+    showBack: Boolean = true,
+    tabRequest: TabRequest? = null,
+    onTabRequestDone: () -> Unit = {},
+) {
     val context = LocalContext.current
     val token = route.token
     val vm: RoomHostViewModel = viewModel(key = "room-$token") {
         RoomHostViewModel(session, route, context.appContainer.roomTabs, createSavedStateHandle())
     }
     val colors = TalqTheme.colors
+    LaunchedEffect(tabRequest) {
+        val request = tabRequest?.takeIf { it.token == token } ?: return@LaunchedEffect
+        val to = request.tab
+        // The tab already shown stays as it is (select() would drop a topic being started).
+        if (to != null && (to != vm.tab || vm.draft != null)) vm.select(to)
+        val at = to ?: vm.tab
+        if (request.messageId != null && at != null) vm.jump = at to request.messageId
+        onTabRequestDone()
+    }
 
     val rooms by session.rooms.rooms.collectAsStateWithLifecycle()
     val topicList by vm.topics.topics.collectAsStateWithLifecycle()
@@ -113,6 +144,10 @@ fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, o
     val direct = room?.takeIf { it.isOneToOne }
     val shifts by context.appContainer.shift.statuses.collectAsStateWithLifecycle()
     val shift = direct?.let { shifts[it.partnerUserId] }
+    // Calls: one-to-one conversations on a server with a call backend.
+    val calls = context.appContainer.calls
+    val callsAvailable by produceState(false, session) { value = calls.available(session) }
+    val canCall = direct != null && !readOnly && callsAvailable
     // Presence comes with the conversation list, which nobody reloads while a chat is open
     // (apart from a push): reload it now and then while this one is in front.
     var inFront by remember { mutableStateOf(false) }
@@ -293,9 +328,23 @@ fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, o
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                    if (showBack) {
+                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                    }
                 },
                 actions = {
+                    if (canCall) {
+                        // During a call these return to it instead of placing another one.
+                        fun call(video: Boolean) = context.startActivity(
+                            if (calls.busy) CallActivity.showIntent(context) else CallActivity.outgoingIntent(context, token, video),
+                        )
+                        IconButton(onClick = { call(video = false) }) {
+                            Icon(Icons.Outlined.Call, contentDescription = "Call")
+                        }
+                        IconButton(onClick = { call(video = true) }) {
+                            Icon(Icons.Outlined.Videocam, contentDescription = "Video call")
+                        }
+                    }
                     // One tap mutes the open topic (Never) or unmutes it (the usual setting);
                     // the long-press menu keeps the finer levels.
                     if (openTopic != null) {
@@ -407,6 +456,10 @@ fun RoomHostScreen(session: TalkSession, route: RoomRoute, onBack: () -> Unit, o
                             tabTitle = if (hasTopics && shown != RoomTab.All) tabName else null,
                             // The message a notification pointed to, in the tab the room opened on.
                             targetMessageId = route.messageId?.takeIf { !hasTopics || shown == vm.openedOn },
+                            // One asked for later, with the room already open.
+                            jumpTo = vm.jump?.takeIf { !hasTopics || it.first == shown }?.second,
+                            // Only this jump: a newer one may have taken its place meanwhile.
+                            onJumped = { id -> if (vm.jump?.second == id) vm.jump = null },
                             // Nor before the room itself (its read marker) is known.
                             readingEnabled = topicsKnown && room != null,
                             snackbar = snackbar,

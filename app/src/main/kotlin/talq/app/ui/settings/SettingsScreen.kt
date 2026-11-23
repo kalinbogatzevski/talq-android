@@ -1,5 +1,6 @@
 package talq.app.ui.settings
 
+import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -45,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -63,6 +65,9 @@ import talq.app.data.ThemeChoice
 import talq.app.theme.colorsFor
 import talq.app.appName
 import talq.app.push.PushRegistrar
+import talq.app.ui.message.plainPreview
+import talq.app.ui.update.updateHowTo
+import talq.app.update.UpdateState
 import talq.app.push.PushStatus
 import talq.app.shift.ErpLink
 import talq.app.shift.ShiftStatusService
@@ -79,6 +84,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     /** Revokes the app password and clears storage. May take a moment. */
     onLogout: () -> Unit,
+    onOpenDiagnostics: () -> Unit = {},
 ) {
     val colors = TalqTheme.colors
     val appName = appName()
@@ -87,9 +93,12 @@ fun SettingsScreen(
     var loggingOut by remember { mutableStateOf(false) }
     val context = LocalContext.current
     var notificationsAllowed by remember { mutableStateOf(true) }
+    var fullScreenCalls by remember { mutableStateOf(true) }
+    val callsAvailable by produceState(false, session) { value = context.appContainer.calls.available(session) }
     // Re-read on every return to the screen: the user may just have been in system settings.
     LifecycleResumeEffect(Unit) {
         notificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        fullScreenCalls = canShowCallsFullScreen(context)
         // An app such as ntfy may have been installed or removed meanwhile.
         push.refreshRoutes()
         onPauseOrDispose { }
@@ -225,12 +234,79 @@ fun SettingsScreen(
             }
 
             Divider()
+            SectionLabel("Sounds")
+            SoundsSection()
+
+            // Android 14 and later can take full-screen access away (the user, or the store for
+            // apps it does not see as calling apps): a call then only shows a notification, also
+            // on the lock screen, and nothing else would say why.
+            if (callsAvailable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                Divider()
+                SectionLabel("Calls")
+                SettingRow(
+                    title = "Incoming calls",
+                    value = if (fullScreenCalls) "Full screen" else "Notification only",
+                    detail = if (fullScreenCalls) null else
+                        "Android is not letting $appName show incoming calls full screen, so a call rings as a " +
+                            "notification only, also on the lock screen. Allow full screen notifications for $appName.",
+                    valueColor = if (fullScreenCalls) colors.online else colors.danger,
+                )
+                if (!fullScreenCalls) {
+                    Row(Modifier.padding(horizontal = 8.dp)) {
+                        TextButton(onClick = { openFullScreenCallSettings(context) }) { Text("Allow full screen") }
+                    }
+                }
+            }
+
+            Divider()
             SectionLabel("Shift status")
             ShiftSection(context.appContainer.shift)
 
             Divider()
+            SectionLabel("Diagnostics")
+            Column(Modifier.fillMaxWidth().clickable(onClick = onOpenDiagnostics).padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Text("Connection diagnostics", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "Checks the server, push, call signaling and every STUN/TURN address, and makes a report to send for support.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textMuted,
+                )
+            }
+
+            Divider()
             SectionLabel("About")
             SettingRow("$appName for Android", BuildConfig.VERSION_NAME)
+            val updates = context.appContainer.updates
+            if (updates.enabled) {
+                val update by updates.state.collectAsStateWithLifecycle()
+                SettingRow(
+                    title = "Updates",
+                    value = when (val s = update) {
+                        UpdateState.Idle -> "Not checked yet"
+                        UpdateState.Checking -> "Checking\u2026"
+                        UpdateState.UpToDate -> "Up to date"
+                        is UpdateState.Available -> "${s.version} available"
+                        is UpdateState.Failed -> "Could not check"
+                    },
+                    detail = when (val s = update) {
+                        is UpdateState.Failed -> s.message
+                        is UpdateState.Available -> {
+                            val notes = s.notes.takeIf { it.isNotBlank() }?.let { plainPreview(it, oneLine = false).take(600) + "\n\n" }.orEmpty()
+                            notes + updateHowTo()
+                        }
+                        else -> null
+                    },
+                    valueColor = when (update) {
+                        is UpdateState.Available -> colors.accentText
+                        is UpdateState.Failed -> colors.danger
+                        else -> colors.textSecondary
+                    },
+                )
+                Row(Modifier.padding(horizontal = 8.dp)) {
+                    if (update is UpdateState.Available) TextButton(onClick = { updates.download() }) { Text("Update") }
+                    if (update !is UpdateState.Checking) TextButton(onClick = updates::checkNow) { Text("Check now") }
+                }
+            }
 
             Divider()
             Spacer(Modifier.height(16.dp))
@@ -464,6 +540,25 @@ private fun openNotificationSettings(context: Context) {
         context.startActivity(intent)
     } catch (_: ActivityNotFoundException) {
     }
+}
+
+/** Whether an incoming call may take the whole screen (always before Android 14). */
+private fun canShowCallsFullScreen(context: Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+        context.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() != false
+
+/** The system page that allows full-screen notifications for this app, else its notification settings. */
+private fun openFullScreenCallSettings(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${context.packageName}"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(intent)
+            return
+        } catch (_: ActivityNotFoundException) {
+        }
+    }
+    openNotificationSettings(context)
 }
 
 /** Where to get a distributor: the installed app store if it knows ntfy, else its F-Droid page. */

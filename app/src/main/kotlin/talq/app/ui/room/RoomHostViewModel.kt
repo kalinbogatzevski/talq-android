@@ -63,6 +63,12 @@ class RoomHostViewModel(
     var openedOn: RoomTab? = tab
         private set
 
+    /**
+     * A message to scroll to in a tab, asked for while the room was already open (a
+     * notification, "Show in chat"); the tab's pane clears it once done.
+     */
+    var jump: Pair<RoomTab, Long>? by mutableStateOf(null)
+
     /** Topic ids in strip order. Fixed once taken; later topics join at the front. */
     var order: List<Long> by mutableStateOf(emptyList())
         private set
@@ -130,6 +136,7 @@ class RoomHostViewModel(
         }
         draft = null
         draftText = ""
+        if (jump?.first != to) jump = null
         tab = to
         saved[KEY_TAB] = to.key
     }

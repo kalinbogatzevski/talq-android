@@ -86,12 +86,48 @@ private const val FENCE = "```"
  *
  * @param myUserId mentions of this user (and of everyone) get the stronger pill
  */
-fun renderMessage(message: ChatMessage, colors: RichTextColors, myUserId: String): List<TextBlock> {
-    val source = message.message
+fun renderMessage(message: ChatMessage, colors: RichTextColors, myUserId: String): List<TextBlock> =
+    renderText(message.message, TextSource(message.parameters, message.markdown, message.isSystem), colors, myUserId, preview = false)
+
+/** What the renderer needs besides the text: its placeholders and how to read it. */
+private class TextSource(val parameters: Map<String, RichObject>, val markdown: Boolean, val isSystem: Boolean)
+
+/** Colours for [plainPreview], which keeps only the text. */
+private val NO_COLORS = RichTextColors(
+    Color.Unspecified, Color.Unspecified, Color.Unspecified, Color.Unspecified,
+    Color.Unspecified, Color.Unspecified, Color.Unspecified,
+)
+private val WHITESPACE_RUN = Regex("\\s+")
+
+/**
+ * [text] as the bubble shows it, without the styling: for the places that show a message as
+ * plain text (chat list, quotes and the reply bar, topic rows, notifications). Markdown markers
+ * and backslash escapes are gone, a link shows its label, a placeholder its name (a file its
+ * file name too, where the bubble draws the file instead). [oneLine]: line breaks and code
+ * blocks run together with single spaces.
+ */
+fun plainPreview(
+    text: String,
+    parameters: Map<String, RichObject> = emptyMap(),
+    markdown: Boolean = true,
+    isSystem: Boolean = false,
+    oneLine: Boolean = true,
+): String {
+    val blocks = renderText(text, TextSource(parameters, markdown, isSystem), NO_COLORS, myUserId = "", preview = true)
+    val joined = blocks.joinToString("\n") {
+        when (it) {
+            is TextBlock.Rich -> it.text.text
+            is TextBlock.Code -> it.code
+        }
+    }
+    return if (oneLine) joined.replace(WHITESPACE_RUN, " ").trim() else joined.trim()
+}
+
+private fun renderText(source: String, from: TextSource, colors: RichTextColors, myUserId: String, preview: Boolean): List<TextBlock> {
     if (source.isEmpty()) return emptyList()
     val blocks = ArrayList<TextBlock>()
-    if (!message.markdown || !source.contains(FENCE)) {
-        addRich(blocks, source, message, colors, myUserId)
+    if (!from.markdown || !source.contains(FENCE)) {
+        addRich(blocks, source, from, colors, myUserId, preview)
         return blocks
     }
     var pos = 0
@@ -99,10 +135,10 @@ fun renderMessage(message: ChatMessage, colors: RichTextColors, myUserId: String
         val open = source.indexOf(FENCE, pos)
         val close = if (open >= 0) source.indexOf(FENCE, open + 3) else -1
         if (open < 0 || close < 0) {
-            addRich(blocks, source.substring(pos), message, colors, myUserId)
+            addRich(blocks, source.substring(pos), from, colors, myUserId, preview)
             break
         }
-        addRich(blocks, source.substring(pos, open), message, colors, myUserId)
+        addRich(blocks, source.substring(pos, open), from, colors, myUserId, preview)
         var code = source.substring(open + 3, close)
         // Drop the language tag of "```kotlin".
         val firstBreak = code.indexOf('\n')
@@ -113,22 +149,34 @@ fun renderMessage(message: ChatMessage, colors: RichTextColors, myUserId: String
     return blocks
 }
 
-private fun addRich(out: MutableList<TextBlock>, raw: String, m: ChatMessage, colors: RichTextColors, myUserId: String) {
+private fun addRich(
+    out: MutableList<TextBlock>,
+    raw: String,
+    from: TextSource,
+    colors: RichTextColors,
+    myUserId: String,
+    preview: Boolean,
+) {
     val text = raw.trim('\n')
     if (text.isBlank()) return
-    val rendered = buildAnnotatedString { Inline(text, m, colors, myUserId, this).run() }
+    val rendered = buildAnnotatedString { Inline(text, from, colors, myUserId, this, preview).run() }
     if (rendered.text.isNotBlank()) out.add(TextBlock.Rich(rendered))
 }
 
-/** One pass over a run of text. Markers nest by recursion on the text between them. */
+/**
+ * One pass over a run of text. Markers nest by recursion on the text between them. [preview]:
+ * plain text for [plainPreview] (file names kept, mentions without the pill's spacing, no quote
+ * bar).
+ */
 private class Inline(
     private val src: String,
-    private val message: ChatMessage,
+    private val from: TextSource,
     private val colors: RichTextColors,
     private val myUserId: String,
     private val out: AnnotatedString.Builder,
+    private val preview: Boolean,
 ) {
-    private val markdown = message.markdown
+    private val markdown = from.markdown
     private val linkStyles = TextLinkStyles(SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline))
 
     fun run() {
@@ -151,11 +199,11 @@ private class Inline(
                 styled(SpanStyle(fontWeight = FontWeight.SemiBold)) { span(body, 0, body.length) }
             }
             trimmed.startsWith("- ") || trimmed.startsWith("* ") -> {
-                out.append("  • ")
+                out.append(if (preview) "• " else "  • ")
                 span(trimmed, 2, trimmed.length)
             }
             trimmed.startsWith("> ") -> {
-                out.append("│ ")
+                if (!preview) out.append("│ ")
                 styled(SpanStyle(fontStyle = FontStyle.Italic, color = colors.muted)) { span(trimmed, 2, trimmed.length) }
             }
             else -> span(line, 0, line.length)
@@ -183,7 +231,7 @@ private class Inline(
             // {placeholder}
             if (c == '{') {
                 val close = s.indexOf('}', i + 1)
-                val obj = if (close in (i + 1) until end) message.parameters[s.substring(i + 1, close)] else null
+                val obj = if (close in (i + 1) until end) from.parameters[s.substring(i + 1, close)] else null
                 if (obj != null) {
                     flush()
                     placeholder(obj)
@@ -363,8 +411,9 @@ private class Inline(
 
     private fun placeholder(obj: RichObject) {
         when {
-            obj.isFile -> Unit
-            obj.key.startsWith("mention-") || (obj.isMention && !message.isSystem) -> {
+            obj.isFile -> if (preview) out.append(obj.name)
+            preview && (obj.key.startsWith("mention-") || (obj.isMention && !from.isSystem)) -> out.append("@${obj.name}")
+            obj.key.startsWith("mention-") || (obj.isMention && !from.isSystem) -> {
                 val me = obj.type == "call" || (obj.type == "user" && obj.id == myUserId)
                 val style = SpanStyle(
                     color = if (me) colors.selfMentionInk else colors.mentionInk,
@@ -374,7 +423,7 @@ private class Inline(
                 // Thin spaces inside the fill give the pill some shoulder.
                 styled(style) { out.append(" @${obj.name} ") }
             }
-            isWebUrl(obj.link) && !message.isSystem -> link(obj.link) { out.append(obj.name) }
+            isWebUrl(obj.link) && !from.isSystem -> link(obj.link) { out.append(obj.name) }
             else -> out.append(obj.name)
         }
     }

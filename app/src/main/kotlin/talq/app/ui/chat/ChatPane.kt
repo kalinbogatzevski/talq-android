@@ -46,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -68,6 +69,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import talq.app.appContainer
 import talq.app.push.TalqNotifications
 import talq.app.theme.TalqTheme
@@ -96,6 +98,9 @@ import talq.core.repo.TalkSession
 
 private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 
+/** How long a message asked for in an open room may take to turn up before the jump is dropped. */
+private const val JUMP_WAIT_MILLIS = 5_000L
+
 /**
  * The content of one tab of an open conversation: the messages and the composer. The room
  * host (`RoomHostScreen`) owns the top bar and the topic strip and shows one pane at a time,
@@ -105,6 +110,8 @@ private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "
  * @param tabTitle the selected tab's name for the composer ("Message in ..."); null in the
  *   whole-chat view
  * @param targetMessageId the message to land on at the first show (from a notification)
+ * @param jumpTo a message to scroll to now, asked for after the first show; [onJumped] gets its
+ *   id once it was done, given up (not turned up within a few seconds) or interrupted
  * @param readingEnabled false while it is not yet known whether this room has topics: having
  *   the newest message on screen in the whole-chat view must not mark every topic read
  * @param onOpenTopic a message's topic label was tapped in the whole-chat view
@@ -122,6 +129,8 @@ fun ChatPane(
     snackbar: SnackbarHostState,
     onOpenTopic: (topicId: Long) -> Unit,
     aboveComposer: @Composable (atBottom: Boolean) -> Unit = {},
+    jumpTo: Long? = null,
+    onJumped: (messageId: Long) -> Unit = {},
 ) {
     val vm: ChatViewModel = viewModel(key = "chat-$token-${tab.key}") {
         ChatViewModel(session, token, tab, createSavedStateHandle())
@@ -216,9 +225,11 @@ fun ChatPane(
     val listState = rememberLazyListState()
     var positioned by rememberSaveable { mutableStateOf(false) }
     var highlight by remember { mutableStateOf<Long?>(null) }
+    // The list as it is now, for code that waits (a coroutine keeps the composition it began in).
+    val latestItems by rememberUpdatedState(items)
 
     suspend fun scrollToMessage(id: Long, animate: Boolean): Boolean {
-        val index = items.indexOfFirst { it is ChatItem.Message && it.message.id == id }
+        val index = latestItems.indexOfFirst { it is ChatItem.Message && it.message.id == id }
         if (index < 0) return false
         val viewport = snapshotFlow { listState.layoutInfo.viewportSize.height }.first { it > 0 }
         // Reversed list: a negative offset lifts the row off the bottom edge.
@@ -251,6 +262,22 @@ fun ChatPane(
         } finally {
             // Only now may "the newest message is on screen" count as reading.
             positioned = true
+        }
+    }
+    // A message asked for with the room already open. It may still be on its way: the tab's feed
+    // starts again when the app comes back to the front.
+    val jumpDone by rememberUpdatedState(onJumped)
+    LaunchedEffect(jumpTo, positioned) {
+        val id = jumpTo ?: return@LaunchedEffect
+        if (!positioned) return@LaunchedEffect
+        try {
+            withTimeoutOrNull(JUMP_WAIT_MILLIS) {
+                snapshotFlow { latestItems.any { it is ChatItem.Message && it.message.id == id } }.first { it }
+            }
+            scrollToMessage(id, animate = true)
+        } finally {
+            // Also when interrupted (the tab left, the scroll touched): never later, out of the blue.
+            jumpDone(id)
         }
     }
     LaunchedEffect(highlight) {

@@ -5,6 +5,29 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonPrimitive
 import talq.core.net.asObject
+import talq.core.call.NotificationState
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
+import talq.core.call.CallEndReason
+import talq.core.call.CallSession
+import talq.core.call.CallState
+import talq.core.call.IceServer
+import talq.core.call.LocalCandidate
+import talq.core.call.MediaConnection
+import talq.core.call.MediaEngine
+import talq.core.call.SentSignal
+import talq.core.call.HpbConnection
+import talq.core.call.HpbInbound
+import talq.core.call.HpbState
+import talq.core.call.helloV1
+import talq.core.call.hpbWebSocketUrl
+import talq.core.call.parseHpb
+import talq.core.net.newHpbHttpClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -50,8 +73,9 @@ object SmokeMain {
     @JvmStatic
     fun main(args: Array<String>) {
         val write = "--write" in args
+        val call = "--call" in args
         val code = try {
-            runBlocking { run(write) }
+            runBlocking { run(write, call) }
             if (failures == 0) 0 else 1
         } catch (e: Throwable) {
             println("SMOKE ABORTED: ${e::class.simpleName}: ${e.message}")
@@ -118,7 +142,7 @@ object SmokeMain {
             (m.parent?.let { " parent=#${it.id}" } ?: "") +
             " ${m.actorId}: ${m.plainText.replace('\n', ' ').take(40)}"
 
-    private suspend fun run(write: Boolean) {
+    private suspend fun run(write: Boolean, call: Boolean) {
         val env = env()
         val server = env["TALQ_TEST_SERVER"]?.takeIf { it.isNotBlank() }
             ?: error("TALQ_TEST_SERVER is not set in ~/.talq-test.env (the test server's https address)")
@@ -136,10 +160,29 @@ object SmokeMain {
         check("talk installed", caps.hasTalk)
         check("threads capability", caps.threads)
         check("read status capability", caps.readStatus)
+
+        println("\n== calls: settings and REST (read-only)")
+        val sig = a.client.signalingSettings()
+        check("signaling settings name an HPB", sig.server.startsWith("https://"))
+        check("hello v1.0 ticket present", sig.helloTicket.isNotEmpty() && sig.helloUserId.isNotEmpty())
+        check("ICE servers include TURN", sig.iceServers.any { s -> s.urls.any { it.startsWith("turn") } })
+        check("settings toString hides the ticket", sig.helloTicket !in sig.toString())
+        check("ICE server toString hides the TURN secret",
+            sig.iceServers.filter { it.credential.isNotEmpty() }.all { it.credential !in it.toString() && it.username !in it.toString() })
+        check("notification-state capability", caps.callNotificationState)
+        println("  recording-consent = ${caps.recordingConsent}  calls enabled = ${caps.callsEnabled}  HPB nodes = ${1 + sig.servers.size}")
+        check("no call running in the test room",
+            a.client.callNotificationState(token) in setOf(NotificationState.Missed, NotificationState.Gone))
         check("bot A shares its read status", caps.sharesReadStatus)
         check("bad password gives Unauthorized", try {
             TalkSession.open(credsA.copy(appPassword = "definitely-wrong")).close(); false
         } catch (e: TalkError.Unauthorized) { true } catch (e: TalkError) { println("    got $e"); false })
+        if (call) {
+            hpbChecks(a, credsB, token)
+            callSessionChecks(a, credsB, token)
+            a.close()
+            return
+        }
 
         println("\n== rooms")
         check("rooms refresh", a.rooms.refresh(), a.rooms.state.value.error?.message ?: "")
@@ -300,6 +343,141 @@ object SmokeMain {
         val after = a.rooms.room(dm)
         check("reading to the bottom clears a reaction-only unread", after?.unreadMessages == 0,
             "unread=${after?.unreadMessages} lastRead=${after?.lastReadMessage} last=${after?.lastMessage?.id}")
+    }
+
+    /**
+     * The call backend's signaling socket (HPB), with both bots in their own room: hello, the
+     * room join and the join/leave events. Joins the room's session (as the app does before a
+     * call) and leaves it again; starts no call.
+     */
+    private suspend fun hpbChecks(a: TalkSession, credsB: Credentials, token: String) = coroutineScope {
+        println("\n== calls: HPB signaling (bots' room, no call)")
+        check("ws url", hpbWebSocketUrl("https://h.example/standalone-signaling/") == "wss://h.example/standalone-signaling/spreed")
+        check("ws url keeps one /spreed", hpbWebSocketUrl("https://h.example/sig/spreed") == "wss://h.example/sig/spreed")
+        check("ws url from http", hpbWebSocketUrl("http://h.example/sig") == "ws://h.example/sig/spreed")
+        check("parse error", parseHpb("""{"type":"error","error":{"code":"no_such_session","message":"gone"}}""") ==
+            HpbInbound.Error("no_such_session", "gone"))
+        check("parse bye", parseHpb("""{"type":"bye","bye":{}}""") == HpbInbound.Bye)
+        check("parse garbage does not throw", parseHpb("not json") is HpbInbound.Other)
+        check("hello carries the ticket", "\"ticket\":\"t1\"" in helloV1("https://nc/backend", "u1", "t1"))
+
+        val b = TalkSession.open(credsB)
+        val http = newHpbHttpClient()
+        val hpbA = HpbConnection(http, a.client.signalingSettings(), a.client.serverUrl, this)
+        val hpbB = HpbConnection(http, b.client.signalingSettings(), b.client.serverUrl, this)
+        try {
+            val idA = hpbA.connect()
+            val idB = hpbB.connect()
+            check("hello gives session ids", idA.isNotEmpty() && idB.isNotEmpty() && idA != idB)
+            val ready = hpbA.state.value as? HpbState.Ready
+            println("  HPB features = ${ready?.features?.sorted()}")
+            check("HPB advertises mcu", ready != null && "mcu" in ready.features)
+
+            hpbA.joinRoom(token, a.client.joinRoomSession(token))
+            // events has no replay: listen before B joins.
+            val seesJoin = async(start = CoroutineStart.UNDISPATCHED) {
+                awaitEvent(hpbA, 10_000) { it is HpbInbound.RoomJoined && it.entries.any { e -> e.sessionId == idB } }
+            }
+            hpbB.joinRoom(token, b.client.joinRoomSession(token))
+            check("A sees B join the room", seesJoin.await())
+
+            val seesLeave = async(start = CoroutineStart.UNDISPATCHED) {
+                awaitEvent(hpbA, 10_000) { it is HpbInbound.RoomLeft && idB in it.sessionIds }
+            }
+            hpbB.leaveRoom()
+            check("A sees B leave the room", seesLeave.await())
+
+            // A quiet socket must stay up: no request timeout, the pings keep it alive.
+            val dropped = async(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(40_000) { hpbA.state.first { it !is HpbState.Ready } }
+            }
+            check("stays connected while idle (40 s)",
+                dropped.await() == null && (hpbA.state.value as? HpbState.Ready)?.sessionId == idA,
+                "state=${hpbA.state.value::class.simpleName}")
+        } finally {
+            hpbA.close(sayBye = true)
+            hpbB.close(sayBye = true)
+            runCatching { a.client.leaveRoomSession(token) }
+            runCatching { b.client.leaveRoomSession(token) }
+            http.close()
+            b.close()
+        }
+        check("closed", hpbA.state.value == HpbState.Disconnected && hpbB.state.value == HpbState.Disconnected)
+    }
+
+    private suspend fun awaitEvent(hpb: HpbConnection, millis: Long, match: (HpbInbound) -> Boolean): Boolean =
+        withTimeoutOrNull(millis) { hpb.events.first { match(it) } } != null
+
+    /**
+     * A one-to-one call between the bots in their own room, signaling only: A calls, B answers,
+     * B hangs up. The media is a stand-in whose canned SDP the media server refuses (its errors
+     * are logged, not checked). Rings nobody but the two bots.
+     */
+    private suspend fun callSessionChecks(a: TalkSession, credsB: Credentials, token: String) = coroutineScope {
+        println("\n== calls: call session (stand-in media, bots' room)")
+        val b = TalkSession.open(credsB)
+        val http = newHpbHttpClient()
+        val before = runCatching { a.client.callPeers(token) }.getOrNull()
+        check("nobody in the room's call before", before?.isEmpty() == true, "in call: ${before?.size}")
+        if (before?.isNotEmpty() == true) {
+            runCatching { a.client.leaveCall(token) }
+            runCatching { b.client.leaveCall(token) }
+        }
+        val clock = { System.currentTimeMillis() }
+        val sessionA = CallSession(a.client, http, token, b.user.userId, StubEngine(), this, clock, log = { println("    A: $it") })
+        val sessionB = CallSession(b.client, http, token, a.user.userId, StubEngine(), this, clock, log = { println("    B: $it") })
+        try {
+            launch { sessionA.start(video = false) }
+            check("A waits for the peer", awaitState(sessionA, 15_000) { it is CallState.WaitingForPeer },
+                "state=${sessionA.state.value}")
+            val idA = sessionA.ownSessionId.value
+            check("A's publisher offer went to A's own session",
+                idA.isNotEmpty() && sessionA.sent.replayCache.filter { it.type == "offer" }.map { it.to } == listOf(idA))
+            launch { sessionB.answer(video = false) }
+            check("A requested B's stream", awaitSent(sessionA, 20_000) {
+                it.type == "requestoffer" && it.to.isNotEmpty() && it.to == sessionB.ownSessionId.value
+            })
+            sessionB.hangUp()
+            check("A sees B hang up", awaitState(sessionA, 10_000) { it == CallState.Ended(CallEndReason.PeerHungUp) },
+                "state=${sessionA.state.value}")
+            sessionA.hangUp() // waits for A's own teardown
+            val emptied = withTimeoutOrNull(10_000) {
+                while (runCatching { a.client.callPeers(token) }.getOrNull()?.isEmpty() != true) delay(1_000)
+                true
+            } == true
+            check("no call left in the room", emptied && a.client.callNotificationState(token) != NotificationState.Ringing)
+        } finally {
+            sessionA.hangUp()
+            sessionB.hangUp()
+            http.close()
+            b.close()
+        }
+    }
+
+    private suspend fun awaitState(s: CallSession, millis: Long, match: (CallState) -> Boolean): Boolean =
+        withTimeoutOrNull(millis) { s.state.first { match(it) } } != null
+
+    private suspend fun awaitSent(s: CallSession, millis: Long, match: (SentSignal) -> Boolean): Boolean =
+        withTimeoutOrNull(millis) { s.sent.first { match(it) } } != null
+
+    /** Media for signaling checks: a canned SDP that the media server refuses, no candidates. */
+    private class StubEngine : MediaEngine {
+        override suspend fun createPublisherOffer(iceServers: List<IceServer>, video: Boolean): String = CANNED_SDP
+        override suspend fun setPublisherAnswer(sdp: String) {}
+        override suspend fun answerSubscriber(peerSessionId: String, offerSdp: String, iceServers: List<IceServer>): String = CANNED_SDP
+        override fun addRemoteCandidate(peerSessionId: String?, candidate: String, sdpMid: String?, sdpMLineIndex: Int) {}
+        override fun setLocalAudio(enabled: Boolean) {}
+        override fun setLocalVideo(enabled: Boolean) {}
+        override fun sendStatus(type: String) {}
+        override val localCandidates: Flow<LocalCandidate> = emptyFlow()
+        override val publisher = MutableStateFlow(MediaConnection.New)
+        override val subscriber = MutableStateFlow(MediaConnection.New)
+        override fun rebuild() {}
+        override fun close() {}
+
+        companion object {
+            const val CANNED_SDP = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+        }
     }
 
     private suspend fun writeChecks(a: TalkSession, credsB: Credentials, token: String) {

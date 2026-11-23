@@ -59,7 +59,7 @@ fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> 
     ) {
         Column(
             modifier = Modifier
-                .widthIn(max = 310.dp)
+                .widthIn(max = bubbleMaxWidth())
                 .clip(RoundedCornerShape(14.dp))
                 .background(colors.bgMessageOwn)
                 .then(if (failed) Modifier.border(1.dp, colors.danger, RoundedCornerShape(14.dp)) else Modifier)

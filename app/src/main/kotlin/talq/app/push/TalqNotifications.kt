@@ -10,7 +10,7 @@ import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
-import talq.app.Brand
+import talq.app.appContainer
 import talq.app.MainActivity
 import talq.app.R
 import talq.app.nav.DeepLink
@@ -20,7 +20,7 @@ enum class NotificationKind(val channelId: String) {
     Message("messages"),
     Mention("mentions"),
 
-    /** Placeholder until calls exist: an incoming call is shown as an ordinary notification. */
+    /** Missed calls (ringing has its own channel, see talq.app.call.CallNotifications). */
     Call("calls"),
 }
 
@@ -134,22 +134,39 @@ object TalqNotifications {
         if (openChat == OpenChat(token, bucket)) openChat = null
     }
 
+    /**
+     * The channel a kind of notification goes to now: the message and mention channels get a
+     * new id when the user picks another message sound (see [talq.app.sound.SoundStore]).
+     */
+    fun channelId(context: Context, kind: NotificationKind): String {
+        val sounds = context.appContainer.sounds
+        return when (kind) {
+            NotificationKind.Message -> sounds.messagesChannel
+            NotificationKind.Mention -> sounds.mentionsChannel
+            NotificationKind.Call -> kind.channelId
+        }
+    }
+
     /** Idempotent; cheap enough to call before every notification. */
     fun ensureChannels(context: Context) {
         val manager = NotificationManagerCompat.from(context)
-        fun channel(kind: NotificationKind, name: String, description: String) {
-            manager.createNotificationChannel(
-                NotificationChannelCompat.Builder(kind.channelId, NotificationManagerCompat.IMPORTANCE_HIGH)
-                    .setName(name)
-                    .setDescription(description)
-                    // The launcher may show a dot or a count for these (its choice).
-                    .setShowBadge(true)
-                    .build(),
-            )
+        val sounds = context.appContainer.sounds
+        val picked = sounds.message.value
+        fun channel(id: String, name: String, description: String, withSound: Boolean) {
+            val builder = NotificationChannelCompat.Builder(id, NotificationManagerCompat.IMPORTANCE_HIGH)
+                .setName(name)
+                .setDescription(description)
+                // The launcher may show a dot or a count for these (its choice).
+                .setShowBadge(true)
+            // The first channels (before any sound was picked) keep the phone's default untouched.
+            if (withSound && id != NotificationKind.Message.channelId && id != NotificationKind.Mention.channelId) {
+                builder.setSound(sounds.uriOf(picked, ring = false), sounds.attributes(ring = false))
+            }
+            manager.createNotificationChannel(builder.build())
         }
-        channel(NotificationKind.Message, "Messages", "New messages in your conversations")
-        channel(NotificationKind.Mention, "Mentions", "Messages that mention you")
-        channel(NotificationKind.Call, "Calls", "Someone started a call. ${Brand.appName(context)} cannot join calls yet.")
+        channel(sounds.messagesChannel, "Messages", "New messages in your conversations", withSound = true)
+        channel(sounds.mentionsChannel, "Mentions", "Messages that mention you", withSound = true)
+        channel(NotificationKind.Call.channelId, "Missed calls", "Calls you did not answer, and calls that came while you were in another call", withSound = false)
     }
 
     // The permission is checked through areNotificationsEnabled(), which lint cannot see.
@@ -177,7 +194,7 @@ object TalqNotifications {
             content.topicTitle.isNotEmpty() -> "${content.title} · ${content.topicTitle}"
             else -> content.title
         }
-        val builder = NotificationCompat.Builder(context, content.kind.channelId)
+        val builder = NotificationCompat.Builder(context, channelId(context, content.kind))
             .setSmallIcon(R.drawable.ic_stat_talq)
             .setColor(ACCENT)
             .setContentTitle(conversation)
@@ -219,7 +236,7 @@ object TalqNotifications {
             context, group.hashCode(), openIntent(context, content.token, 0L, 0L),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val summary = NotificationCompat.Builder(context, content.kind.channelId)
+        val summary = NotificationCompat.Builder(context, channelId(context, content.kind))
             .setSmallIcon(R.drawable.ic_stat_talq)
             .setColor(ACCENT)
             .setContentTitle(content.title)

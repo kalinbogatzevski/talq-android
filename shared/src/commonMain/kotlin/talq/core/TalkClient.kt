@@ -20,6 +20,10 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import talq.core.call.CallPeer
+import talq.core.call.IceServer
+import talq.core.call.NotificationState
+import talq.core.call.SignalingSettings
 import talq.core.model.ChatMessage
 import talq.core.model.ChatPage
 import talq.core.model.Credentials
@@ -32,6 +36,8 @@ import talq.core.model.UserInfo
 import talq.core.net.TalkJson
 import talq.core.net.asArray
 import talq.core.net.asObject
+import talq.core.net.arr
+import talq.core.net.strings
 import talq.core.net.long
 import talq.core.net.newTalkHttpClient
 import talq.core.net.obj
@@ -178,6 +184,94 @@ class TalkClient(
 
     private fun OcsResponse.threads(): List<TalkThreadInfo> =
         data.asArray().mapNotNull { it.asObject() }.map { TalkThreadInfo.fromJson(it) }
+
+    // ---------------------------------------------------------------- calls
+
+    /**
+     * The signaling server (HPB), hello v1.0 credentials and STUN/TURN servers for this user.
+     * The STUN fallback is Nextcloud's public one, as the Talk clients use.
+     */
+    @OptIn(kotlin.time.ExperimentalTime::class)
+    suspend fun signalingSettings(nowMillis: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()): SignalingSettings {
+        val o = ocs(HttpMethod.Get, "apps/spreed/api/v3/signaling/settings").objectData("signaling settings")
+        val hello = o.obj("helloAuthParams")?.obj("1.0")
+        fun servers(key: String): List<IceServer> = o.arr(key).mapNotNull { it.asObject() }.mapNotNull { s ->
+            // `urls` is a list (or, on old servers, one string); some send `url`.
+            val urls = s.strings("urls").ifEmpty { listOfNotNull(s.str("urls").ifEmpty { null } ?: s.str("url").ifEmpty { null }) }
+            if (urls.isEmpty()) null else IceServer(urls, s.str("username"), s.str("credential"))
+        }
+        val stun = servers("stunservers").ifEmpty { listOf(IceServer(listOf("stun:stun.nextcloud.com:443"))) }
+        return SignalingSettings(
+            server = o.str("server"),
+            servers = o.arr("servers").mapNotNull { it.asObject()?.str("server")?.ifEmpty { null } },
+            helloUserId = hello?.str("userid").orEmpty(),
+            helloTicket = hello?.str("ticket").orEmpty(),
+            iceServers = stun + servers("turnservers"),
+            fetchedAtMillis = nowMillis,
+        )
+    }
+
+    /** Join the conversation (not the call) and get this client's Nextcloud session id for it. */
+    suspend fun joinRoomSession(token: String): String =
+        ocs(HttpMethod.Post, "apps/spreed/api/v4/room/${seg(token)}/participants/active", body = buildJsonObject {})
+            .objectData("join room").str("sessionId")
+            .ifEmpty { throw TalkError.Protocol("join room: no sessionId") }
+
+    /** Leave the conversation's session (the counterpart of [joinRoomSession]). */
+    suspend fun leaveRoomSession(token: String) {
+        ocs(HttpMethod.Delete, "apps/spreed/api/v4/room/${seg(token)}/participants/active")
+    }
+
+    /** Join the conversation's call with [flags] ([talq.core.call.CallFlags]). */
+    suspend fun joinCall(token: String, flags: Int, silent: Boolean = false, recordingConsent: Boolean = false) {
+        ocs(
+            HttpMethod.Post, "apps/spreed/api/v4/call/${seg(token)}",
+            body = buildJsonObject {
+                put("flags", flags)
+                put("silent", silent)
+                put("recordingConsent", recordingConsent)
+            },
+        )
+    }
+
+    /** Change this participant's call flags (microphone or camera switched). */
+    suspend fun updateCallFlags(token: String, flags: Int) {
+        ocs(HttpMethod.Put, "apps/spreed/api/v4/call/${seg(token)}", body = buildJsonObject { put("flags", flags) })
+    }
+
+    /** Leave the call, for this session only. */
+    suspend fun leaveCall(token: String) {
+        ocs(HttpMethod.Delete, "apps/spreed/api/v4/call/${seg(token)}", body = buildJsonObject { put("all", false) })
+    }
+
+    /** Who is in the conversation's call now, with their Nextcloud session ids. */
+    suspend fun callPeers(token: String): List<CallPeer> =
+        ocs(HttpMethod.Get, "apps/spreed/api/v4/call/${seg(token)}").data.asArray().mapNotNull { it.asObject() }.map { p ->
+            CallPeer(
+                actorType = p.str("actorType"),
+                actorId = p.str("actorId"),
+                displayName = p.str("displayName"),
+                ncSessionId = p.str("sessionId"),
+                lastPing = p.long("lastPing"),
+            )
+        }
+
+    /** Whether a phone ringing for the call in [token] should keep ringing. Other statuses throw. */
+    suspend fun callNotificationState(token: String): NotificationState {
+        val r = ocsRaw(HttpMethod.Get, "apps/spreed/api/v4/call/${seg(token)}/notification-state")
+        return when (r.status) {
+            200 -> NotificationState.Ringing
+            201 -> NotificationState.Missed
+            404 -> NotificationState.Gone
+            403 -> NotificationState.Forbidden
+            else -> throw errorFor(r)
+        }
+    }
+
+    /** Dismiss one notification on the server (all of this user's devices). */
+    suspend fun dismissNotification(id: Long) {
+        ocs(HttpMethod.Delete, "apps/notifications/api/v2/notifications/$id")
+    }
 
     // ---------------------------------------------------------------- account
 

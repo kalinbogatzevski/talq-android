@@ -22,6 +22,7 @@ import talq.app.Brand
 import talq.app.BuildConfig
 import talq.app.SessionState
 import talq.app.ui.common.userMessage
+import talq.app.ui.message.plainPreview
 import talq.core.TalkError
 import talq.core.WebPushRegistration
 import talq.core.WebPushResult
@@ -373,6 +374,7 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
 
     /** A decrypted push from the server. */
     fun onMessage(content: ByteArray) {
+        talq.app.diag.DiagStore.pushReceived(appContext)
         val payload = PushPayload.parse(content)
         if (payload == null) {
             Log.w(TAG, "unreadable push payload (${content.size} bytes)")
@@ -383,17 +385,30 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         container.restoreIfUnreachable()
         when (payload) {
             is PushPayload.Activation -> container.scope.launch { activate(payload.token) }
-            is PushPayload.Notify -> {
+            // A call in a one-to-one conversation rings like a phone call (CallRinger); other
+            // calls stay ordinary notifications.
+            is PushPayload.Notify -> if (payload.isTalk && payload.objectType == "call") {
+                if (loggingOut) return
+                container.scope.launch {
+                    if (!container.ringer.ring(payload.nid, payload.objectId.substringBefore('/'), payload.subject)) {
+                        showAtOnce(payload)
+                        showNotification(payload)
+                    }
+                }
+            } else {
                 showAtOnce(payload)
                 container.scope.launch { showNotification(payload) }
             }
-            // Deletes mean something was read elsewhere: the number on the icon follows.
+            // Deletes mean something was read elsewhere: the number on the icon follows. A
+            // ringing call whose notification goes was answered or dismissed elsewhere.
             is PushPayload.Delete -> {
                 TalqNotifications.cancel(appContext, payload.nids)
+                container.scope.launch { container.ringer.stop(payload.nids) }
                 recountAfterRead()
             }
             PushPayload.DeleteAll -> {
                 TalqNotifications.cancelAll(appContext)
+                container.scope.launch { container.ringer.stopAll() }
                 recountAfterRead()
             }
         }
@@ -612,7 +627,13 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
             ?: room?.displayName?.takeIf { it.isNotEmpty() }
             ?: Brand.appName(appContext)
         val sender = (subjectObjects["user"] ?: subjectObjects["actor"])?.name.orEmpty()
-        val body = detail?.message.orEmpty()
+        val aboutChat = isTalk && push.objectType == "chat" && token.isNotEmpty()
+        // A chat message comes as its raw text (markdown and escapes included): show it as the
+        // bubble would, unstyled, from the version with placeholders, so a name with "_" or "*"
+        // in it (a file, a person) is not read as markdown. Other notifications are plain already.
+        val rich = detail?.messageRich.orEmpty()
+        val body = if (aboutChat && rich.isNotEmpty()) plainPreview(rich, detail?.messageRichParameters.orEmpty(), oneLine = false)
+        else detail?.message.orEmpty()
         val topicTitle =
             if (threadId > 0 && token.isNotEmpty()) session?.topics(token)?.topic(threadId)?.thread?.title.orEmpty() else ""
 
@@ -640,7 +661,7 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
             text = body.ifEmpty { detail?.subject.orEmpty() }.ifEmpty { push.subject }.ifEmpty { "New notification" },
             whenMillis = parseTime(detail?.datetime),
             isGroup = !oneToOne,
-            aboutChat = isTalk && push.objectType == "chat" && token.isNotEmpty(),
+            aboutChat = aboutChat,
         )
     }
 

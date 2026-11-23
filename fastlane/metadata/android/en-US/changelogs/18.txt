@@ -1,0 +1,1 @@
+0.6.1: tablets, unfolded phones and wide windows show the conversation list beside the open conversation, with a divider you can drag. Folding, unfolding or resizing keeps the open conversation, its tab and the unsent text.

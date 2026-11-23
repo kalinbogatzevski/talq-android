@@ -20,7 +20,7 @@ enum class ThemeChoice(val id: String, val label: String, val description: Strin
 }
 
 /**
- * How the app looks, on this phone. Not tied to an account: signing out keeps it. Read
+ * How the app looks, on this device. Not tied to an account: signing out keeps it. Read
  * synchronously at start (a small preferences file) so the first frame already has the theme.
  */
 class AppearanceStore(context: Context) {
@@ -33,7 +33,17 @@ class AppearanceStore(context: Context) {
         prefs.edit().putString(KEY_THEME, choice.id).apply()
     }
 
+    /** Width of the conversation list beside an open conversation (tablets, wide windows), in dp. */
+    val listPaneWidthDp: Float
+        get() = prefs.getFloat(KEY_LIST_WIDTH, DEFAULT_LIST_WIDTH_DP)
+
+    fun setListPaneWidthDp(dp: Float) {
+        prefs.edit().putFloat(KEY_LIST_WIDTH, dp).apply()
+    }
+
     private companion object {
         const val KEY_THEME = "theme"
+        const val KEY_LIST_WIDTH = "list_pane_width_dp"
+        const val DEFAULT_LIST_WIDTH_DP = 360f
     }
 }

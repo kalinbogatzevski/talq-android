@@ -8,10 +8,11 @@ TalQ is a native client for Nextcloud Talk, built with Kotlin and Jetpack Compos
 <li>Messages with formatting, mentions, replies, reactions and image previews. A message that could not be sent stays with Retry.</li>
 <li>Files: send photos, videos and files (photos shrunk and location removed unless you send the original), uploads in the background, share into TalQ from other apps, in-app video and voice playback, and a Shared files view.</li>
 <li>Notifications through UnifiedPush (for example ntfy) and your server's web push. A muted topic stays silent.</li>
+<li>One-to-one audio and video calls with TalQ for desktop and the Nextcloud web app: incoming calls ring like phone calls, also over the lock screen; mute, camera, speaker and Bluetooth; the call goes on with the screen off. Needs Talk's high-performance backend on the server.</li>
 <li>Optional shift status from your organisation's ERP.</li>
 <li>Four themes, as on desktop (Ember, Warm, Vivid, Paper), or following the phone's light/dark setting.</li>
 </ul>
 
-Calls are not there yet.
+Group calls are not there yet.
 
 TalQ is an independent client and is not affiliated with Nextcloud GmbH. It needs a Nextcloud server with Talk.

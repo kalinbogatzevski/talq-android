@@ -108,8 +108,21 @@ android {
         applicationId = "io.github.kalinbogatzevski.talq"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.5.7"
+        versionCode = 20
+        versionName = "0.6.3"
+        // Calls bring libwebrtc's native library (12 MB for arm64, 7 MB for 32-bit ARM, more
+        // for x86). Phones and tablets are ARM; x86 builds would only serve emulators and a few
+        // Chromebooks, at three times the size.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    // Native libraries compressed in the APK: a much smaller download, unpacked once on install.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     signingConfigs {
@@ -154,6 +167,12 @@ android {
             buildConfigField("String", "BRAND_SERVER_URL", quoted(brandValue("serverUrl")))
             buildConfigField("String", "BRAND_ERP_BASE_URL", quoted(brandValue("erpBaseUrl")))
             buildConfigField("String", "BRAND_SHORT_NAME", quoted(brandValue("shortName")))
+            // Its own update channel (optional; without it the app does not look for updates):
+            // the manifest's https address on the organisation's server and, for a password-
+            // protected public share, the share token and its password.
+            buildConfigField("String", "BRAND_UPDATE_MANIFEST_URL", quoted(brandValue("updateManifestUrl")))
+            buildConfigField("String", "BRAND_UPDATE_SHARE_TOKEN", quoted(brandValue("updateShareToken")))
+            buildConfigField("String", "BRAND_UPDATE_SHARE_PASSWORD", quoted(brandValue("updateSharePassword")))
         }
         create("google") {
             dimension = "push"
@@ -243,6 +262,10 @@ dependencies {
     implementation(libs.datastore.preferences)
     implementation(libs.androidx.browser)
     implementation(libs.unifiedpush.connector)
+    // Calls: libwebrtc (media) and core-telecom (system call integration).
+    implementation(libs.webrtc.android)
+    implementation(libs.core.telecom)
+    implementation(libs.androidx.window)
     // Push through Google Play services without an extra app: google variants only.
     "googleImplementation"(libs.unifiedpush.embedded.fcm)
     implementation(libs.work.runtime.ktx)

@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.6.3
+
+- **Settings > Diagnostics**: what the app can and cannot reach, each line with a coloured dot.
+  The server (answer time, versions, the account), push (how it arrives, the last push, whether
+  Android allows notifications and full-screen calls, whether battery saving holds the app back),
+  the call signaling server (a real sign-in, closed at once) and every STUN and TURN address the
+  server hands out (each asked for an address or a relay, as a call would), the network (Wi-Fi or
+  mobile, VPN, metered, IPv6, proxy) and shift status. A red line that a setting fixes opens that
+  setting. The checks run only on this screen, never in the background.
+- **Share report**: everything on that screen plus the app's recent log as one text file, through
+  the usual share sheet (into a chat, by email...). It leaves out passwords, keys, the signaling
+  ticket and call credentials.
+- **Settings > Sounds**: pick the message sound and the call ringtone: the phone's own, one of the
+  app's tones (the same as TalQ for desktop: six message tones, seven ringtones), any sound from
+  the phone, or silent. Picking one plays it. A new sound replaces that notification channel, so
+  Android's own settings for it (importance, vibration) start again from the app's defaults.
+
+## 0.6.2
+
+- **The conversation that is already open stays as it was** when you tap a notification about
+  it, share something into it or use "Show in chat" in its shared files: it comes back to the
+  front, switches to the right topic and scrolls to the message, and the unsent text in every
+  tab is kept (it used to open afresh and lose it).
+- **Previews show messages as the chat does**: the chat list, quotes, the reply bar, the topic
+  list and notifications no longer show markdown markers or backslashes (`**`, `\[`).
+- **Settings, Calls** (Android 14 and later): says when Android does not let the app show
+  incoming calls full screen (a call then rings as a notification only, also on the lock
+  screen), with a button to the system page that allows it.
+- The app tells the server its real version (it said 0.1.0).
+- A conversation list reload that failed is no longer hidden by an older one that worked, and an
+  old failure no longer shows over a list that was just reloaded.
+- A branded build learns about its updates from its organisation's own update channel: it looks
+  every two hours (while the app is in front) and offers a newer version at the top of the conversation list and in
+  Settings. Update opens the download in the browser; you open the file and Android asks before
+  installing it. The app itself installs nothing and asks for no permission to (an unknown app
+  that installs other apps is blocked by Google Play Protect). The public app has none of this
+  (its stores update it).
+- Third-party notices: the code inside the WebRTC library (used for calls) is now listed as it is
+  in the app, each part with its full license text, including the parts the webrtc-sdk build
+  adds under the Apache License 2.0.
+
+## 0.6.1
+
+- **Tablets, unfolded phones and wide windows** (at least 600 dp wide and 480 dp tall) show the
+  conversation list on the left and the open conversation on the right. The open conversation
+  is highlighted in the list; with none open the right side says "Select a conversation".
+  Shared files and Settings open on the right too. Smaller windows, and a phone turned
+  sideways, keep the phone layout.
+- **The divider between the two can be dragged** (the list from 280 to 560 dp wide; TalkBack
+  users have "Make the list wider / narrower" on it). The width is kept on the device. On a
+  foldable held half open like a book, the divider sits on the hinge.
+- Folding, unfolding, turning the device or resizing the window switches between the layouts
+  on the spot and keeps the open conversation, its tab and the unsent text.
+- Beside the list, a conversation has no back arrow, and back leaves the app (the list is
+  already on screen); back from Shared files or Settings returns to the conversation.
+- In the wide layout, messages may be up to 480 dp wide (310 dp on a phone).
+- A conversation you have just read no longer shows its unread count again for a few seconds
+  when a list reload that was already on its way comes back.
+
+## 0.6.0
+
+- **One-to-one calls, audio and video.** A one-to-one conversation has a phone and a camera
+  button at the top. Calls go through your Nextcloud's Talk high-performance backend (its
+  signaling server and media server), the way TalQ for desktop and the Nextcloud web app call,
+  so a call works with both, in either direction. On a server without that backend the buttons
+  do not show.
+- **Incoming calls ring like a phone call**: full screen, also over the lock screen, with the
+  ringtone, Answer and Decline. The ringing stops when the caller gives up, when you answer on
+  another device, or after 45 s, and then leaves a missed call with "Call back". Declining also
+  takes the call off your other devices (the caller keeps ringing until they give up: Talk has
+  no way to send a decline). A call in a group conversation does not ring; group calls are not
+  in this version.
+- **In a call**: the other person's video full screen (their picture when they have none), your
+  own preview in a corner, mute, camera on and off, front or back camera, earpiece, speaker,
+  Bluetooth or a headset, the duration, and a note when nothing arrives from the other side
+  ("Can't hear them"). In an audio call the screen goes dark at your ear.
+- **The call keeps running** with the screen off or in another app: the notification shows it,
+  with Hang up, and the conversation list has a bar back to it. A regular phone call puts it on
+  hold. A short loss of the network shows "Reconnecting…" and either comes back or ends the call.
+- The microphone (and the camera for a video call) is asked for when you place or answer your
+  first call; the camera can also be switched on later in a call.
+- Placing a call from the lock screen (Call back on a missed call) asks to unlock first.
+- The app is larger: calls bring WebRTC's native library. It is included for ARM phones and
+  tablets only, so x86 emulators and x86 Chromebooks can no longer install TalQ.
+
 ## 0.5.7
 
 - **Italic and bold around inline code show correctly again.** 0.5.6 drew

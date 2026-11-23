@@ -144,7 +144,7 @@ sealed interface ShiftStatusResult {
 }
 
 /** An HTTP client for the ERP only: nothing of the Nextcloud account is in it, no redirect is followed. */
-fun newErpHttpClient(userAgent: String = TalqCore.USER_AGENT): HttpClient = platformHttpClient {
+fun newErpHttpClient(userAgent: String = TalqCore.userAgent): HttpClient = platformHttpClient {
     expectSuccess = false
     followRedirects = false
     install(UserAgent) { agent = userAgent }

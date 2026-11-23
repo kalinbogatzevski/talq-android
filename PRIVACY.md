@@ -34,6 +34,13 @@ for it and collects nothing: no analytics, no advertising, no trackers, no crash
   The push service carries the encrypted message. It can see when a push arrives, how large it
   is, which server sent it to which phone, and a notification number and priority the server
   attaches; not what it says.
+- **Calls**: the call is set up through your Nextcloud server and its call backend (the
+  signaling server and media server your Nextcloud is configured with). Your voice and, when
+  the camera is on, your video go encrypted (DTLS-SRTP) to that media server, which passes them
+  to the other person; where a direct path is blocked they go through the TURN relay servers
+  your Nextcloud names. The app keeps no recording and no call history of its own. The
+  microphone and camera are used only during a call you placed or answered, while the call's
+  notification is showing; the camera only while you have it switched on.
 - **Shift status (optional)**: only if an ERP address is set. Pairing sends the ERP the phone's
   model name, shown on its approval page. Once you approved the phone in your browser, the app
   sends, over https and only to that ERP, the Nextcloud user names
@@ -44,8 +51,15 @@ for it and collects nothing: no analytics, no advertising, no trackers, no crash
 ## Permissions
 
 Internet; notifications; running uploads in the background (foreground service, data sync);
-setting the unread count on Honor and Huawei home screens. Added by the push and background-work
-libraries: keeping the phone awake briefly while a notification is handled, checking whether a
+setting the unread count on Honor and Huawei home screens. For calls, asked for when you
+place or answer your first call: the microphone, and the camera for video calls; on Android
+12 and later the names of Bluetooth devices, for the audio output list. Without asking:
+managing its own calls with the phone's call system (Bluetooth headsets, cars, and a regular
+phone call putting a TalQ call on hold), keeping a call running in the background (foreground
+service for phone calls, microphone and camera), showing an incoming call over the lock
+screen, changing the audio output, and turning the screen off at your ear during a call.
+Added by the push and background-work libraries: keeping the phone awake briefly while a
+notification is handled, checking whether a
 network is available before background work, and restarting scheduled background work after
 the phone restarts. Photos and files are picked through the system picker, so no storage
 permission is asked.

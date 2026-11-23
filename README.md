@@ -5,8 +5,8 @@ Android sibling of [TalQ for desktop](https://github.com/kalinbogatzevski/talq-d
 Topics (Talk's threads) are first-class: each topic is a tab inside its conversation, with its
 own place, draft, unread count and notification level.
 
-**Status: early (0.5.x).** Chat, topics, files and notifications work; calls are not there
-yet. See `CHANGELOG.md` for what each version does.
+**Status: early (0.6.x).** Chat, topics, files, notifications and one-to-one calls work; group
+calls are not there yet. See `CHANGELOG.md` for what each version does.
 
 **Download:** the APKs are on the [releases page](https://github.com/kalinbogatzevski/talq-android/releases):
 `TalQ-android-<version>.apk`, or `TalQ-android-<version>-foss.apk` without the Google push
@@ -35,11 +35,20 @@ route. Each has a `.sha256` file next to it.
   build uses UnifiedPush only). A topic or conversation set to "Never" stays silent. On Honor and
   Huawei home screens the app icon shows the unread count; other launchers show their usual
   notification dot.
+- **One-to-one calls**, audio and video, with TalQ for desktop and the Nextcloud web app: call
+  from a one-to-one conversation, or answer a call that rings like a phone call (also over the
+  lock screen); mute, camera on and off, front or back camera, earpiece, speaker, Bluetooth or
+  headset; the call keeps running with the screen off or in another app. Calls need a
+  Nextcloud with Talk's high-performance backend (an external signaling server); without one
+  the call buttons do not show.
 - **Shift status (optional)**: if your organisation's ERP offers the pairing and shift-status
   endpoints that desktop TalQ uses, one-to-one avatars also show whether a colleague is on
   shift, on a break or off shift. You pair the phone once in your browser; the key is stored
   encrypted and only ever sent to that ERP, over https. With no ERP address set in Settings
   nothing about shifts is shown or sent.
+- **Tablets and foldables**: a window at least 600 dp wide and 480 dp tall shows the
+  conversation list beside the open conversation, with a divider you can drag; folding, unfolding or resizing keeps the
+  open conversation as it is.
 - Four themes, as on desktop (Ember, Warm, Vivid, Paper), or following the phone's light/dark setting.
 
 Android 8.0 (API 26) or newer.
@@ -72,6 +81,10 @@ server address (its sign-in screen has no server field) and ERP address. It has 
 app. Everything that names the brand comes from a private store,
 `private/branding/<brand>/`, which is not part of this repository; the top of
 `app/build.gradle.kts` describes its layout. Without it only the `generic` flavor is built.
+A branded app can also learn about its updates from an update channel on its organisation's
+server (a JSON manifest written by `scripts/publish-update.sh`, with a download link the app
+opens in the browser); only the `branded` flavor contains that code. No flavor installs
+anything itself.
 
 ## Layout
 

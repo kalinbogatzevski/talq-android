@@ -28,6 +28,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import talq.app.badge.BadgeRefreshWorker
 import talq.app.badge.UnreadBadge
+import talq.app.call.CallController
+import talq.app.call.CallRinger
 import talq.app.data.AppearanceStore
 import talq.app.data.KeystoreCredentialStore
 import talq.app.data.NotifyLevelStore
@@ -42,7 +44,11 @@ import talq.app.push.NotificationGate
 import talq.app.push.PushRegistrar
 import talq.app.push.UnifiedPushRegistrar
 import talq.app.shift.ShiftStatusService
+import talq.app.sound.SoundStore
+import talq.app.update.AppUpdates
+import talq.app.update.newAppUpdates
 import talq.core.TalkError
+import talq.core.TalqCore
 import talq.core.model.Credentials
 import talq.core.repo.TalkSession
 
@@ -93,6 +99,12 @@ class AppContainer(context: Context) {
     /** How the app looks on this phone (theme); not tied to an account. */
     val appearance = AppearanceStore(appContext)
 
+    /** The message sound and the ringtone (Settings > Sounds); not tied to an account. */
+    val sounds = SoundStore(appContext)
+
+    /** The app updating itself: the branded build's own channel; nothing in the generic build. */
+    val updates: AppUpdates = newAppUpdates(appContext)
+
     /** Whether a notification may be shown: a muted conversation or topic shows nothing. */
     val gate = NotificationGate(appContext, notifyLevels) { session }
 
@@ -101,6 +113,12 @@ class AppContainer(context: Context) {
 
     /** Shift status of colleagues from the organisation's ERP, and the pairing with it (see [ShiftStatusService]). */
     val shift = ShiftStatusService(appContext, scope) { bringToFront() }
+
+    /** The one call this phone can be in (see [CallController]). */
+    val calls = CallController(appContext, this)
+
+    /** Incoming calls ringing (see [CallRinger]). */
+    val ringer = CallRinger(appContext, this)
 
     /** The push stage replaces this with the real implementation (in [TalqApp.onCreate]). */
     var pushRegistrar: PushRegistrar = NoOpPushRegistrar()
@@ -212,6 +230,9 @@ class AppContainer(context: Context) {
     suspend fun logout() = mutex.withLock {
         val session = session
         if (session != null) {
+            // Leave a running call while the account still works (after the revoke, leaving answers 401).
+            ringer.signedOut()
+            calls.signedOut()
             try {
                 pushRegistrar.onLoggedOut()
             } catch (e: CancellationException) {
@@ -250,6 +271,8 @@ class AppContainer(context: Context) {
         scope.launch {
             mutex.withLock {
                 val session = session ?: return@withLock
+                ringer.signedOut()
+                calls.abort()
                 // Push belongs to the account that just went away: drop the subscription on
                 // the phone, its notifications, and a tap that was waiting to be opened.
                 try {
@@ -306,12 +329,20 @@ class CredentialStorageException(cause: Throwable) : Exception("The account coul
 private const val TAG = "TalqApp"
 private const val STORAGE_RETRY_MS = 400L
 
+/** How often the app asks the (throttled) update check while it is in front. */
+private const val UPDATE_TICK_MILLIS = 15L * 60 * 1000
+
 class TalqApp : Application(), SingletonImageLoader.Factory {
     lateinit var container: AppContainer
         private set
 
+    /** Asks the update check now and then while the app is in front (see onCreate). */
+    private var updateTicks: kotlinx.coroutines.Job? = null
+
     override fun onCreate() {
         super.onCreate()
+        // First: every client the container makes sends this version in its User-Agent.
+        TalqCore.setAppVersion(BuildConfig.VERSION_NAME)
         container = AppContainer(this)
         // Before restore(): opening the session is what starts the push registration.
         container.pushRegistrar = UnifiedPushRegistrar(this, container)
@@ -325,8 +356,25 @@ class TalqApp : Application(), SingletonImageLoader.Factory {
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             LifecycleEventObserver { _, event ->
                 when (event) {
-                    Lifecycle.Event.ON_START -> container.shift.setForeground(true)
-                    Lifecycle.Event.ON_STOP -> container.shift.setForeground(false)
+                    Lifecycle.Event.ON_START -> {
+                        container.shift.setForeground(true)
+                        // The update check is throttled inside (every two hours); asking now and
+                        // then also covers an app that stays open all day on a desk.
+                        if (container.updates.enabled) {
+                            updateTicks?.cancel()
+                            updateTicks = container.scope.launch {
+                                while (true) {
+                                    container.updates.checkIfDue()
+                                    kotlinx.coroutines.delay(UPDATE_TICK_MILLIS)
+                                }
+                            }
+                        }
+                    }
+                    Lifecycle.Event.ON_STOP -> {
+                        container.shift.setForeground(false)
+                        updateTicks?.cancel()
+                        updateTicks = null
+                    }
                     else -> Unit
                 }
             },

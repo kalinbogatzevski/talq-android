@@ -11,8 +11,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import talq.core.TalkClient
 import talq.core.TalkError
 import talq.core.TalkFiles
@@ -186,6 +189,23 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
     private var autoJob: Job? = null
     private var askedFollowedTopics = false
 
+    // Reloads can be answered out of order (the auto refresh, push-triggered reloads, a pull), and
+    // a "mark read" echoed while one is on its way is newer than its answer. One clock orders
+    // them all: a reload's list is shown only if no later-sent reload's list is, and keeps the
+    // read echoes made after it was sent; its error is shown only if nothing sent later has
+    // answered, and a success clears only an error from a reload sent before it. Without this
+    // the open conversation beside the list (wide layout) showed its unread badge again after
+    // it had been read, and a stale answer could hide a newer failure (a 401) or show one.
+    private val clock = MutableStateFlow(0L)
+    /** Guards the step from "is this answer the newest" to showing it, and [shownFrom]/[errorFrom]. */
+    private val publish = Mutex()
+    /** [clock] when the reload whose list is shown was sent. */
+    private var shownFrom = -1L
+    /** [clock] when the reload whose error is in [state] was sent. */
+    private var errorFrom = -1L
+    /** Read echoes not yet known to be in a reload's answer: token to (marker, clock). */
+    private val echoes = MutableStateFlow<Map<String, Pair<Long, Long>>>(emptyMap())
+
     /** All conversations, most recent activity first. */
     val rooms: StateFlow<List<Room>> = _rooms.asStateFlow()
     val state: StateFlow<LoadState> = _state.asStateFlow()
@@ -195,16 +215,41 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
     /** Reload from the server. Returns false (and sets [state].error) on failure. */
     suspend fun refresh(): Boolean {
         _state.update { it.copy(loading = true) }
+        val sentAt = clock.updateAndGet { it + 1 }
         return try {
             // With the other person's presence on one-to-one rooms (noStatusUpdate stays on:
             // loading the list must not make this account look online).
             val list = session.client.rooms(includeStatus = true).sortedByDescending { it.lastActivity }
-            _rooms.value = list
-            _state.value = LoadState(loaded = true)
-            noteTopics(list)
+            val newest = publish.withLock {
+                if (sentAt < shownFrom) {
+                    // A reload sent later has already been answered: this answer is older and
+                    // has nothing to add (not even clearing an error).
+                    _state.update { it.copy(loading = false) }
+                    return@withLock false
+                }
+                shownFrom = sentAt
+                // Echoes from before this reload was sent are in its answer; later ones are not.
+                echoes.update { all -> all.filterValues { it.second > sentAt } }
+                _rooms.update {
+                    val newer = echoes.value
+                    list.map { room -> newer[room.token]?.let { room.withRead(it.first) } ?: room }
+                }
+                // An error from a reload sent after this one is newer than this success: kept.
+                _state.update { if (sentAt > errorFrom) LoadState(loaded = true) else it.copy(loaded = true, loading = false) }
+                true
+            }
+            if (newest) noteTopics(list)
             true
         } catch (e: TalkError) {
-            _state.update { it.copy(loading = false, error = e) }
+            publish.withLock {
+                if (sentAt > shownFrom && sentAt > errorFrom) {
+                    errorFrom = sentAt
+                    _state.update { it.copy(loading = false, error = e) }
+                } else {
+                    // A reload sent later has already answered (or failed): this failure is old news.
+                    _state.update { it.copy(loading = false) }
+                }
+            }
             false
         }
     }
@@ -247,19 +292,22 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
 
     /** Local echo of a successful "mark read", so the badge clears without a round trip. */
     internal fun applyRead(token: String, lastReadMessage: Long) {
-        _rooms.update { list ->
-            list.map {
-                if (it.token != token || it.lastReadMessage >= lastReadMessage) it
-                else {
-                    val caughtUp = lastReadMessage >= (it.lastMessage?.id ?: 0L)
-                    it.copy(
-                        lastReadMessage = lastReadMessage,
-                        unreadMessages = if (caughtUp) 0 else it.unreadMessages,
-                        unreadMention = if (caughtUp) false else it.unreadMention,
-                        unreadMentionDirect = if (caughtUp) false else it.unreadMentionDirect,
-                    )
-                }
-            }
+        val at = clock.updateAndGet { it + 1 }
+        echoes.update { all ->
+            val earlier = all[token]?.first ?: 0L
+            all + (token to (maxOf(earlier, lastReadMessage) to at))
         }
+        _rooms.update { list -> list.map { if (it.token == token) it.withRead(lastReadMessage) else it } }
+    }
+
+    private fun Room.withRead(marker: Long): Room {
+        if (lastReadMessage >= marker) return this
+        val caughtUp = marker >= (lastMessage?.id ?: 0L)
+        return copy(
+            lastReadMessage = marker,
+            unreadMessages = if (caughtUp) 0 else unreadMessages,
+            unreadMention = if (caughtUp) false else unreadMention,
+            unreadMentionDirect = if (caughtUp) false else unreadMentionDirect,
+        )
     }
 }

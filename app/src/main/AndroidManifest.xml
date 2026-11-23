@@ -10,6 +10,29 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- Calls (call/): the microphone, and the camera for video calls, asked for on the call
+         screen when a call starts or is answered. The call is one of the phone's own calls
+         (Bluetooth headsets, cars, a regular call putting it on hold), runs in a foreground
+         service while the screen is off or another app is in front, rings over the lock screen,
+         and turns the screen off at the ear. Bluetooth: the names of headsets in the audio
+         output list (Android 12+). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Without these lines the two permissions above would hide the app from devices that
+         have no camera or no microphone. Calls are optional. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
     <!-- The unread number on the app icon, on Honor and Huawei launchers (badge/BadgeUpdater.kt).
          Other phones ignore these; nothing is asked of the user. -->
     <uses-permission android:name="com.hihonor.android.launcher.permission.CHANGE_BADGE" />
@@ -90,6 +113,36 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- The call screen: its own task, shown over the lock screen (only this activity, never
+             the chats). Not exported: notifications and the app open it with explicit intents. -->
+        <activity
+            android:name=".call.CallActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="${applicationId}.call"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+            tools:targetApi="27" />
+
+        <!-- Keeps a call running in the background, with its notification. -->
+        <service
+            android:name=".call.TalqCallService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone|camera" />
+
+        <!-- Keeps the app running while a call rings (its notification is the ringing one). -->
+        <service
+            android:name=".call.TalqRingService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall" />
+
+        <!-- Decline and Hang up from the call notifications. -->
+        <receiver
+            android:name=".call.CallActionReceiver"
+            android:exported="false" />
 
         <!-- WorkManager's foreground service, given the type Android 14+ asks for. -->
         <service

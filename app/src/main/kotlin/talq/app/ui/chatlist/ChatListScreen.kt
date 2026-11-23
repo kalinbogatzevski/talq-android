@@ -3,6 +3,7 @@ package talq.app.ui.chatlist
 import androidx.compose.material3.TextButton
 import talq.app.shift.ErpLink
 import talq.app.Brand
+import talq.app.ui.call.CallInProgressBar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.NotificationsOff
@@ -42,13 +44,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -71,6 +77,9 @@ import talq.app.ui.common.StatusAvatar
 import talq.app.ui.common.firstName
 import talq.app.ui.common.relativeTime
 import talq.app.ui.common.userMessage
+import talq.app.ui.message.previewText
+import talq.app.ui.update.UpdateBanner
+import talq.app.ui.update.showsUpdateBanner
 import talq.app.ui.message.topicColor
 import talq.core.TalkError
 import talq.core.model.NotificationLevel
@@ -82,6 +91,7 @@ import talq.core.shift.ShiftState
 /** How often the list is reloaded while it is on screen. */
 private const val REFRESH_MILLIS = 12_000L
 
+/** [selectedToken]: the conversation open beside the list (wide layout), drawn selected. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatListScreen(
@@ -90,6 +100,7 @@ fun ChatListScreen(
     onOpenTopic: (token: String, topicId: Long) -> Unit,
     onOpenSettings: () -> Unit,
     onUnauthorized: () -> Unit,
+    selectedToken: String? = null,
 ) {
     val rooms by session.rooms.rooms.collectAsStateWithLifecycle()
     val load by session.rooms.state.collectAsStateWithLifecycle()
@@ -102,6 +113,19 @@ fun ChatListScreen(
     val erpLink by shiftService.link.collectAsStateWithLifecycle()
     val erpLinkKnown by shiftService.linkKnown.collectAsStateWithLifecycle()
     val pairReminder = rememberPairReminder()
+    // The branded build's own update offer (nothing in the generic build).
+    val updates = LocalContext.current.appContainer.updates
+    val update by updates.state.collectAsStateWithLifecycle()
+    val updateDismissed by updates.dismissed.collectAsStateWithLifecycle()
+    val updateBanner = updates.enabled && showsUpdateBanner(update, updateDismissed)
+    val listState = rememberLazyListState()
+    // Inserted above the first row the list keeps in place, it would sit out of view. Only when
+    // it appears: coming back to the list (or turning the phone) with it shown is not that.
+    var bannerShown by rememberSaveable { mutableStateOf(updateBanner) }
+    LaunchedEffect(updateBanner) {
+        if (updateBanner && !bannerShown && listState.firstVisibleItemIndex <= 2) listState.animateScrollToItem(0)
+        bannerShown = updateBanner
+    }
     val scope = rememberCoroutineScope()
     var pulling by remember { mutableStateOf(false) }
 
@@ -131,14 +155,17 @@ fun ChatListScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(appName(), style = MaterialTheme.typography.titleLarge) },
-                actions = {
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                    }
-                },
-            )
+            Column {
+                TopAppBar(
+                    title = { Text(appName(), style = MaterialTheme.typography.titleLarge) },
+                    actions = {
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                        }
+                    },
+                )
+                CallInProgressBar()
+            }
         },
     ) { padding ->
         PullToRefreshBox(
@@ -173,7 +200,10 @@ fun ChatListScreen(
                         detail = "Conversations you join on your server show up here.",
                     )
 
-                else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                else -> LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 16.dp)) {
+                    if (updateBanner) {
+                        item(key = "update") { UpdateBanner(update, updates) }
+                    }
                     val unpaired = erpLink is ErpLink.NotPaired || erpLink is ErpLink.Rejected
                     if (Brand.isBranded && erpLinkKnown && unpaired && pairReminder.due) {
                         item(key = "pair") {
@@ -192,6 +222,7 @@ fun ChatListScreen(
                             session, room, now,
                             hasTopics = room.token in withTopics,
                             shift = shifts[room.partnerUserId]?.state ?: ShiftState.Unknown,
+                            selected = room.token == selectedToken,
                             onClick = { onOpenRoom(room.token) },
                             onOpenTopic = { id -> onOpenTopic(room.token, id) },
                         )
@@ -274,6 +305,7 @@ private fun RoomRow(
     nowMillis: Long,
     hasTopics: Boolean,
     shift: ShiftState,
+    selected: Boolean,
     onClick: () -> Unit,
     onOpenTopic: (topicId: Long) -> Unit,
 ) {
@@ -295,9 +327,16 @@ private fun RoomRow(
         previewLine(session, room, colors, withTopic = unreadTopic == null)
     }
 
+    // The open conversation (wide layout) is highlighted; its pills then take the list's own
+    // ground, which would otherwise be the same colour as the highlight.
+    val ground = if (selected) colors.bgSelected else MaterialTheme.colorScheme.background
+    val chipFill = if (selected) MaterialTheme.colorScheme.background else colors.bgSelected
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(ground)
+            // Not `selected`: TalkBack would read every other row as an unchecked toggle.
+            .then(if (selected) Modifier.semantics { stateDescription = "Open" } else Modifier)
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -308,7 +347,7 @@ private fun RoomRow(
                 url = session.client.roomAvatarUrl(room.token, room.avatarVersion, dark),
                 authorization = session.client.authorizationHeader,
                 name = room.displayName,
-                ring = MaterialTheme.colorScheme.background,
+                ring = ground,
                 size = 52.dp,
                 presence = room.status,
                 shift = shift,
@@ -358,33 +397,37 @@ private fun RoomRow(
             }
             Spacer(Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (unreadTopic != null) {
-                    TopicPill(unreadTopic.topicId, unreadTopic.threadTitle.trim()) { onOpenTopic(unreadTopic.topicId) }
-                    Spacer(Modifier.width(6.dp))
-                } else if (hasTopics) {
-                    Icon(
-                        Icons.Outlined.Forum,
-                        contentDescription = "Has topics",
-                        tint = colors.textMuted,
-                        modifier = Modifier.size(14.dp),
+                // The badges are measured first; the pill and the preview share the rest, so a
+                // long topic title in a narrow list cannot squeeze the unread count away.
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    if (unreadTopic != null) {
+                        TopicPill(unreadTopic.topicId, unreadTopic.threadTitle.trim(), chipFill) { onOpenTopic(unreadTopic.topicId) }
+                        Spacer(Modifier.width(6.dp))
+                    } else if (hasTopics) {
+                        Icon(
+                            Icons.Outlined.Forum,
+                            contentDescription = "Has topics",
+                            tint = colors.textMuted,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = preview,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (muted) colors.textMuted else colors.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
-                    Spacer(Modifier.width(5.dp))
                 }
-                Text(
-                    text = preview,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (muted) colors.textMuted else colors.textSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
                 if (room.unreadMention) {
                     Spacer(Modifier.width(6.dp))
-                    Badge("@", muted = muted && !room.unreadMentionDirect)
+                    Badge("@", muted = muted && !room.unreadMentionDirect, mutedFill = chipFill)
                 }
                 if (unread) {
                     Spacer(Modifier.width(6.dp))
-                    Badge(if (room.unreadMessages > 999) "999+" else room.unreadMessages.toString(), muted)
+                    Badge(if (room.unreadMessages > 999) "999+" else room.unreadMessages.toString(), muted, mutedFill = chipFill)
                 }
             }
         }
@@ -393,12 +436,12 @@ private fun RoomRow(
 
 /** The topic of the newest unread message: tap it to open the conversation on that topic. */
 @Composable
-private fun TopicPill(topicId: Long, title: String, onClick: () -> Unit) {
+private fun TopicPill(topicId: Long, title: String, fill: Color, onClick: () -> Unit) {
     val colors = TalqTheme.colors
     Row(
         modifier = Modifier
             .clip(CircleShape)
-            .background(colors.bgSelected)
+            .background(fill)
             .clickable(role = Role.Button, onClickLabel = "Open topic $title", onClick = onClick)
             .padding(start = 5.dp, end = 9.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -419,13 +462,13 @@ private fun TopicPill(topicId: Long, title: String, onClick: () -> Unit) {
 
 /** Unread pill. Accent when it wants attention, a quiet warm fill for muted conversations. */
 @Composable
-private fun Badge(text: String, muted: Boolean) {
+private fun Badge(text: String, muted: Boolean, mutedFill: Color) {
     val colors = TalqTheme.colors
     Box(
         modifier = Modifier
             .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
             .clip(CircleShape)
-            .background(if (muted) colors.bgSelected else colors.accent)
+            .background(if (muted) mutedFill else colors.accent)
             .padding(horizontal = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -445,7 +488,7 @@ private fun Badge(text: String, muted: Boolean) {
  */
 private fun previewLine(session: TalkSession, room: Room, colors: TalqColors, withTopic: Boolean = true): AnnotatedString {
     val last = room.lastMessage ?: return AnnotatedString("")
-    val text = last.plainText.replace('\n', ' ').trim()
+    val text = previewText(last)
     if (last.isSystem) {
         return buildAnnotatedString { withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(text) } }
     }

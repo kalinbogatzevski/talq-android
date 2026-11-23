@@ -1,0 +1,1 @@
+0.6.2: a notification about the conversation already open keeps its unsent text. Previews show messages without markdown markers. Settings says when Android keeps incoming calls from showing full screen, with a button to allow it.

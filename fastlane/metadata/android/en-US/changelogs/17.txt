@@ -1,0 +1,1 @@
+0.6.0: one-to-one audio and video calls with TalQ for desktop and the Nextcloud web app. Incoming calls ring like phone calls (also over the lock screen), with mute, camera, speaker and Bluetooth, and keep running in the background. Needs Talk's high-performance backend.
