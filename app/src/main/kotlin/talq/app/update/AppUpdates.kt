@@ -22,11 +22,11 @@ sealed interface UpdateState {
 
 /**
  * The app learning about its own updates from its organisation's channel: the branded build
- * only, which is shared as an APK and has no store to update it. It only tells: "Update" opens
- * the new version's download in the browser, and the user installs the file from there, as any
- * downloaded app. The app itself installs nothing and holds no permission to (an unknown app
- * that downloads and installs APKs is what Play Protect blocks as a "dropper"). The generic build
- * (Google Play, F-Droid, GitHub) gets [NoAppUpdates].
+ * only, which is shared as an APK and has no store to update it. "Update" hands the new
+ * version's APK to Android's download manager, and the user installs the finished download from
+ * its notification or the Downloads app, as any downloaded app. The app itself installs nothing
+ * and holds no permission to (an unknown app that installs APKs is what Play Protect blocks as a
+ * "dropper"). The generic build (Google Play, F-Droid, GitHub) gets [NoAppUpdates].
  */
 interface AppUpdates {
     /** False: nothing about updates is shown anywhere. */
@@ -42,8 +42,14 @@ interface AppUpdates {
     /** Asks the channel now (Settings). */
     fun checkNow()
 
-    /** Opens the available version's download in the browser. False: no browser could open it. */
+    /**
+     * Starts the available version's download (Android's download manager). A second tap while it
+     * runs starts nothing; once it is done, a tap opens Downloads. False: it could not start.
+     */
     fun download(): Boolean
+
+    /** True while the available version is downloading: the Update buttons are disabled meanwhile. */
+    val downloading: StateFlow<Boolean>
 
     /** "Not now" for the version on offer. */
     fun dismiss()
@@ -57,5 +63,6 @@ object NoAppUpdates : AppUpdates {
     override fun checkIfDue() = Unit
     override fun checkNow() = Unit
     override fun download() = false
+    override val downloading: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
     override fun dismiss() = Unit
 }

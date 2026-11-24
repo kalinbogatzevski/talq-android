@@ -63,8 +63,18 @@ fun Avatar(
     }
 }
 
-/** An image request that carries the account's credentials. Use for every server image. */
-fun authorizedImage(context: android.content.Context, url: String, authorization: String): ImageRequest =
+/**
+ * An image request that carries the account's credentials. Use for every server image.
+ * [memoryKey]: an exact memory-cache key (the URL), so another screen can find this copy again;
+ * [placeholderKey]: shown from the memory cache while this one loads (see [thumbnailKey]).
+ */
+fun authorizedImage(
+    context: android.content.Context,
+    url: String,
+    authorization: String,
+    memoryKey: String? = null,
+    placeholderKey: String? = null,
+): ImageRequest =
     ImageRequest.Builder(context)
         .data(url)
         .httpHeaders(
@@ -73,7 +83,24 @@ fun authorizedImage(context: android.content.Context, url: String, authorization
                 .set("OCS-APIRequest", "true")
                 .build(),
         )
+        .apply {
+            if (memoryKey != null) memoryCacheKey(memoryKey)
+            if (placeholderKey != null) placeholderMemoryCacheKey(placeholderKey)
+        }
         .build()
+
+/**
+ * The memory-cache key of a picture's thumbnail: its preview URL, set as the exact key by the chat
+ * bubble (720) and the shared-files grid (360), so the full-screen viewer can show that copy at
+ * once while the sharp one loads.
+ */
+fun thumbnailKey(previewUrl: String): String = previewUrl
+
+/** The preview size of a picture in a chat bubble (the viewer looks for this copy first). */
+const val BUBBLE_PREVIEW_PX = 720
+
+/** The preview size of a picture in the shared-files media grid. */
+const val GRID_PREVIEW_PX = 360
 
 private fun initial(name: String): String {
     val trimmed = name.trim()

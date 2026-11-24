@@ -1,0 +1,1 @@
+0.7.0: Folders for your conversations, the same as in TalQ for desktop: touch and hold a conversation to put it in a folder; tap a folder to close or open it. Settings > Folders: Show folders, and Keep my folders in sync (off by default), which keeps them the same as on your other devices through one small file in your own Nextcloud Files.

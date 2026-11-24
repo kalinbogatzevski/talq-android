@@ -1,19 +1,28 @@
 package talq.app.ui.room
 
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import talq.app.data.RoomTabStore
 import talq.app.nav.RoomRoute
+import talq.app.ui.chat.MessageSelection
+import talq.app.ui.chat.forwardResultText
+import talq.app.ui.chat.sayAnywhere
 import talq.app.ui.common.userMessage
 import talq.app.ui.topics.topicUnread
 import talq.core.TalkError
+import talq.core.UploadedFile
+import talq.core.model.ForwardPlan
 import talq.core.model.TalkThreadInfo
+import talq.core.model.forwardPlan
 import talq.core.repo.ChatRepository
 import talq.core.repo.ChatScope
 import talq.core.repo.OutboxStatus
@@ -33,6 +42,8 @@ class RoomHostViewModel(
     val session: TalkSession,
     val route: RoomRoute,
     private val tabStore: RoomTabStore,
+    /** The application's context (never an activity's): for a forward's line after the room was left. */
+    private val appContext: Context,
     private val saved: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
     val token: String = route.token
@@ -98,6 +109,13 @@ class RoomHostViewModel(
 
     private var refreshJob: Job? = null
 
+    /** Messages picked in the tab on screen, for Copy and Forward. Switching tabs ends it. */
+    val selection = MessageSelection()
+
+    /** A forward is on its way: the Forward button shows progress and takes nothing more. */
+    var forwarding by mutableStateOf(false)
+        private set
+
     init {
         if (tab == null) {
             viewModelScope.launch {
@@ -136,6 +154,7 @@ class RoomHostViewModel(
         }
         draft = null
         draftText = ""
+        selection.clear()
         if (jump?.first != to) jump = null
         tab = to
         saved[KEY_TAB] = to.key
@@ -207,6 +226,7 @@ class RoomHostViewModel(
     fun startDraft(title: String) {
         val clean = title.trim()
         if (clean.isEmpty()) return
+        selection.clear()
         draft = DraftTopic(clean)
         draftText = ""
     }
@@ -240,6 +260,69 @@ class RoomHostViewModel(
         draftText = wholeChat.state.value.outbox.firstOrNull { it.referenceId == ref }?.text.orEmpty()
         wholeChat.discard(ref)
         draft = current.copy(referenceId = null)
+    }
+
+    // ---------------------------------------------------------------- forward
+
+    /**
+     * Forward what is picked into the conversation [target], one message after another in chat
+     * order, as TalQ for desktop does (`MainWindow::forwardOneMessage`): a file is shared again,
+     * a text is posted again with its "Forwarded from" line (`talq.core.model.forwardPlan`).
+     * Stops at the first refusal so nothing arrives out of order; says in one line how it went
+     * and ends the selection. Runs on the session's scope, the result line included: leaving the
+     * room does not cut it off, and the line is then said app-wide. The session ending (signed
+     * out) under it cancels it, and then nothing is said.
+     */
+    fun forward(target: String) {
+        if (forwarding) return
+        val picked = selection.messages()
+        if (picked.isEmpty()) {
+            selection.clear()
+            return
+        }
+        forwarding = true
+        selection.locked = true
+        val run = session.launch {
+            var sent = 0
+            var failure: TalkError? = null
+            for (m in picked) {
+                try {
+                    when (val plan = forwardPlan(m)) {
+                        is ForwardPlan.File -> session.files.share(target, UploadedFile(plan.path, plan.name, draft = false))
+                        is ForwardPlan.Text -> session.client.sendMessage(target, plan.body)
+                        ForwardPlan.Empty -> continue
+                    }
+                    sent++
+                } catch (e: TalkError) {
+                    failure = e
+                    break
+                }
+            }
+            val line = forwardResultText(picked.size, sent, failure)
+            withContext(Dispatchers.Main) {
+                if (cleared) {
+                    sayAnywhere(appContext, line)
+                } else {
+                    selection.clear()
+                    notice = line
+                }
+            }
+        }
+        viewModelScope.launch {
+            try {
+                run.join()
+            } finally {
+                forwarding = false
+                selection.locked = false
+            }
+        }
+    }
+
+    /** This view is gone (the room was left): a forward's line is said app-wide. Main thread. */
+    private var cleared = false
+
+    override fun onCleared() {
+        cleared = true
     }
 
     // ---------------------------------------------------------------- chip menu

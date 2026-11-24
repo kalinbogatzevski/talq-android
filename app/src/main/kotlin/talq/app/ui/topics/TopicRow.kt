@@ -132,7 +132,7 @@ internal fun CountBadge(text: String, muted: Boolean) {
         modifier = Modifier
             .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
             .clip(CircleShape)
-            .background(if (muted) colors.bgSelected else colors.accent)
+            .background(if (muted) colors.bgSelected else colors.countFill)
             .padding(horizontal = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -140,7 +140,7 @@ internal fun CountBadge(text: String, muted: Boolean) {
             text = text,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
-            color = if (muted) colors.textSecondary else colors.controlInk,
+            color = if (muted) colors.textSecondary else colors.inkOn(colors.countFill),
             maxLines = 1,
         )
     }

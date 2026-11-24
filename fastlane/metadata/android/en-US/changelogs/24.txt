@@ -1,0 +1,1 @@
+0.7.1: Update starts one download only; archived conversations are hidden behind an Archived row; shorter Settings texts.

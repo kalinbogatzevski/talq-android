@@ -10,7 +10,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.em
 import talq.app.theme.TalqColors
 import talq.core.model.ChatMessage
 import talq.core.model.RichObject
@@ -39,7 +39,9 @@ data class RichTextColors(
     val mentionFill: Color,
     val selfMentionInk: Color,
     val selfMentionFill: Color,
-    val codeBg: Color,
+    /** The fill and ink of `inline code` (TalqColors.codeSpan, textPrimary as desktop's `code` rule). */
+    val codeSpan: Color,
+    val codeInk: Color,
     val muted: Color,
 ) {
     companion object {
@@ -49,7 +51,8 @@ data class RichTextColors(
             mentionFill = c.accentSoft,
             selfMentionInk = c.controlInk,
             selfMentionFill = c.accent,
-            codeBg = c.codeBg,
+            codeSpan = c.codeSpan,
+            codeInk = c.textPrimary,
             muted = c.textMuted,
         )
     }
@@ -95,7 +98,7 @@ private class TextSource(val parameters: Map<String, RichObject>, val markdown: 
 /** Colours for [plainPreview], which keeps only the text. */
 private val NO_COLORS = RichTextColors(
     Color.Unspecified, Color.Unspecified, Color.Unspecified, Color.Unspecified,
-    Color.Unspecified, Color.Unspecified, Color.Unspecified,
+    Color.Unspecified, Color.Unspecified, Color.Unspecified, Color.Unspecified,
 )
 private val WHITESPACE_RUN = Regex("\\s+")
 
@@ -267,12 +270,13 @@ private class Inline(
                     }
                     continue
                 }
-                // `code`
+                // `code`: monospace at the size of the text around it (desktop's `code` rule sets no
+                // size; 0.92em only evens out the monospace face's larger look), on a faint tint.
                 if (c == '`') {
                     val close = s.indexOf('`', i + 1)
                     if (close in (i + 2)..(end - 1)) {
                         flush()
-                        styled(SpanStyle(fontFamily = FontFamily.Monospace, background = colors.codeBg, fontSize = 13.sp)) {
+                        styled(SpanStyle(fontFamily = FontFamily.Monospace, color = colors.codeInk, background = colors.codeSpan, fontSize = 0.92.em)) {
                             out.append(s.substring(i + 1, close))
                         }
                         i = close + 1

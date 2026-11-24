@@ -60,7 +60,10 @@ import talq.app.appContainer
 import talq.app.theme.TalqTheme
 import talq.app.ui.common.MessagePane
 import talq.app.ui.common.authorizedImage
+import talq.app.ui.common.onSecondaryClick
 import talq.app.ui.common.relativeTime
+import talq.app.ui.common.GRID_PREVIEW_PX
+import talq.app.ui.common.thumbnailKey
 import talq.app.ui.common.userMessage
 import talq.app.ui.message.DownloadRing
 import talq.app.ui.message.FileCard
@@ -260,6 +263,7 @@ private fun MediaGrid(
                     .padding(2.dp)
                     .aspectRatio(1f)
                     .background(if (file.isVideo) Color.Black else TalqTheme.colors.bgSecondary)
+                    .onSecondaryClick { onLongPress(m) }
                     .combinedClickable(
                         onClick = { if (file.isImage && file.previewAvailable) fileUi.openImage(file, images) else fileUi.open(file) },
                         onLongClick = { onLongPress(m) },
@@ -267,8 +271,8 @@ private fun MediaGrid(
                 contentAlignment = Alignment.Center,
             ) {
                 if (file.previewAvailable) {
-                    val url = session.client.filePreviewUrl(file.id, 360, 360)
-                    val request = remember(url) { authorizedImage(context, url, session.client.authorizationHeader) }
+                    val url = session.client.filePreviewUrl(file.id, GRID_PREVIEW_PX, GRID_PREVIEW_PX)
+                    val request = remember(url) { authorizedImage(context, url, session.client.authorizationHeader, memoryKey = thumbnailKey(url)) }
                     AsyncImage(model = request, contentDescription = file.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 } else if (!file.isVideo) {
                     Text(
@@ -300,7 +304,7 @@ private fun FileList(
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
         items(section.items, key = { it.id }) { m ->
             val file: RichObject = m.file ?: return@items
-            Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+            Column(Modifier.fillMaxWidth().onSecondaryClick { onLongPress(m) }.padding(vertical = 3.dp)) {
                 if (voiceTab || file.isAudio) {
                     VoiceCard(file, voiceMessage = m.isVoiceMessage, onLongPress = { onLongPress(m) })
                 } else {

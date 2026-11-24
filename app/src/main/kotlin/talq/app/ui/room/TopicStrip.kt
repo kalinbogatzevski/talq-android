@@ -48,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import talq.app.theme.TalqTheme
+import talq.app.ui.common.onSecondaryClick
 import talq.app.ui.message.topicColor
 import talq.app.ui.topics.TabUnread
 
@@ -56,7 +57,7 @@ data class StripChip(
     val tab: RoomTab,
     val title: String,
     val unread: TabUnread = TabUnread(),
-    /** Topic notifications set to Never: a slashed bell after the title, its badge grey. */
+    /** Topic notifications set to Never: dimmed, a slashed bell after the title, a quiet count. */
     val muted: Boolean = false,
     /** Topic notifications set to mentions only: a small "@" after the title. */
     val mentionsOnly: Boolean = false,
@@ -153,8 +154,10 @@ private fun Chip(
     modifier: Modifier = Modifier,
 ) {
     val colors = TalqTheme.colors
-    val unread = chip.unread.any
-    // Selected: the accent tint (where you are). Others neutral: unread in full ink, read dimmed.
+    // A silenced (Never) topic never takes the unread style: it does not call for you (desktop's
+    // TopicTabBar::makeChip). Selected: the accent tint (where you are). Others neutral: unread in
+    // full ink, read or silenced dimmed.
+    val unread = chip.unread.any && !chip.muted
     val fill = if (selected) colors.accentSoft else colors.bgSurface
     val ink = when {
         selected -> colors.accentSoftInk
@@ -169,12 +172,13 @@ private fun Chip(
             .background(fill)
             .border(1.dp, if (selected) colors.accent else colors.divider, shape)
             .semantics { this.selected = selected }
+            .onSecondaryClick(onLongPress)
             .combinedClickable(role = Role.Tab, onClick = onClick, onLongClick = onLongPress)
-            .padding(start = 6.dp, end = 10.dp),
+            .padding(start = 12.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Mark(chip, dimmed = !selected && !unread)
-        Spacer(Modifier.width(6.dp))
+        Mark(chip, ink = ink, dimmed = !selected && !unread)
+        Spacer(Modifier.width(7.dp))
         Text(
             text = chip.title,
             style = MaterialTheme.typography.labelLarge,
@@ -184,22 +188,23 @@ private fun Chip(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 150.dp),
         )
-        // The topic's notification setting, as desktop marks it: a slashed bell for Never,
-        // "@" for mentions only. Nothing for the usual setting.
+        // The topic's notification setting, as desktop marks it, in the chip's own ink: a slashed
+        // bell for Never, "@" for mentions only. Nothing for the usual setting.
         if (chip.muted) {
             Spacer(Modifier.width(4.dp))
-            Icon(Icons.Outlined.NotificationsOff, contentDescription = "Muted", tint = colors.textMuted, modifier = Modifier.size(14.dp))
+            Icon(Icons.Outlined.NotificationsOff, contentDescription = "Muted", tint = ink, modifier = Modifier.size(13.dp))
         } else if (chip.mentionsOnly) {
             Spacer(Modifier.width(4.dp))
             Text(
                 "@",
                 fontSize = 12.sp,
                 lineHeight = 14.sp,
-                color = colors.textMuted,
+                color = ink,
                 modifier = Modifier.semantics { contentDescription = "Mentions only" },
             )
         }
-        // One badge: "@" when mentioned, else the count, else a dot when the count is unknown.
+        // One badge: "@" when mentioned, else the count, else a dot when the count is unknown. A
+        // silenced topic's count is an outline in the quiet ink, not the filled pill (desktop).
         val badge = chip.unread.badge
         if (badge != null) {
             Spacer(Modifier.width(6.dp))
@@ -207,7 +212,10 @@ private fun Chip(
                 modifier = Modifier
                     .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
                     .clip(CircleShape)
-                    .background(if (chip.muted) colors.bgSelected else colors.accent)
+                    .then(
+                        if (chip.muted) Modifier.border(1.dp, colors.textSecondary, CircleShape)
+                        else Modifier.background(colors.countFill),
+                    )
                     .padding(horizontal = 5.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -216,7 +224,7 @@ private fun Chip(
                     fontSize = 11.sp,
                     lineHeight = 14.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (chip.muted) colors.textSecondary else colors.controlInk,
+                    color = if (chip.muted) colors.textSecondary else colors.inkOn(colors.countFill),
                     maxLines = 1,
                 )
             }
@@ -268,29 +276,18 @@ private fun DraftChip(title: String, onDiscard: (() -> Unit)?, modifier: Modifie
     }
 }
 
-/** The leading round mark: a stack glyph for All, "#" for General, the topic's letter on its colour. */
+/**
+ * The small leading mark, in the chip's [ink]: a stack glyph for All, "#" for General, and for a
+ * topic its identity colour as a small dot (the same dot as the conversation list's topic pill).
+ * Desktop's chips carry only a glyph; the letter disc on every chip was noise.
+ */
 @Composable
-private fun Mark(chip: StripChip, dimmed: Boolean) {
-    val colors = TalqTheme.colors
-    val size = 22.dp
+private fun Mark(chip: StripChip, ink: Color, dimmed: Boolean) {
     when (val tab = chip.tab) {
-        RoomTab.All -> Box(Modifier.size(size).clip(CircleShape).background(colors.bgSelected), contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.Layers, contentDescription = null, tint = colors.textSecondary, modifier = Modifier.size(14.dp))
-        }
-        RoomTab.General -> Box(Modifier.size(size).clip(CircleShape).background(colors.bgSelected), contentAlignment = Alignment.Center) {
-            Text("#", color = colors.textSecondary, fontSize = 12.sp, lineHeight = 14.sp, fontWeight = FontWeight.SemiBold)
-        }
+        RoomTab.All -> Icon(Icons.Outlined.Layers, contentDescription = null, tint = ink, modifier = Modifier.size(15.dp))
+        RoomTab.General -> Text("#", color = ink, fontSize = 14.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold)
         is RoomTab.Topic -> Box(
-            Modifier.size(size).clip(CircleShape).background(topicColor(tab.id).copy(alpha = if (dimmed) 0.6f else 1f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                chip.title.trim().take(1).uppercase().ifEmpty { "#" },
-                color = Color.White,
-                fontSize = 12.sp,
-                lineHeight = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
+            Modifier.size(10.dp).clip(CircleShape).background(topicColor(tab.id).copy(alpha = if (dimmed) 0.6f else 1f)),
+        )
     }
 }

@@ -200,8 +200,17 @@ class UnreadTracker internal constructor(
      * The user has looked at everything in [scope] up to message [upTo] (a message of this
      * room). Clears those counts at once and moves the server's read marker as far as no
      * other bucket's unread message is skipped. Never moves the marker backwards.
+     *
+     * [upTo] may be any message (the chat screen passes the newest one that has been on screen,
+     * also halfway through a backlog). One call at a time per room, every tab of it included: the
+     * server writes the marker it is sent, also an older one, so two requests that overtake each
+     * other could move it back.
      */
-    suspend fun markSeen(scope: ChatScope, upTo: Long) {
+    suspend fun markSeen(scope: ChatScope, upTo: Long) = markMutex.withLock { markSeenLocked(scope, upTo) }
+
+    private val markMutex = Mutex()
+
+    private suspend fun markSeenLocked(scope: ChatScope, upTo: Long) {
         if (upTo <= 0) return
         if (session.rooms.room(token) == null) {
             // The read marker is unknown (the rooms list has not loaded): moving it now could
@@ -238,8 +247,12 @@ class UnreadTracker internal constructor(
         }
         if (target <= marker()) return
         try {
-            client.markRead(token, target)
-            session.rooms.applyRead(token, target)
+            val answer = client.markRead(token, target)
+            // The server's unread numbers after the move (only with federation-v1, and only when the
+            // answer is about this marker), so a room read halfway shows what is left at once.
+            val left = answer?.takeIf { session.capabilities.has("federation-v1") && it.lastReadMessage == target }
+                ?.let { ReadLeft(it.unreadMessages, it.unreadMention, it.unreadMentionDirect) }
+            session.rooms.applyRead(token, target, left)
             _state.update { it.copy(entries = it.entries.filter { e -> e.id > target }) }
         } catch (e: TalkError) {
             // Stays unread on the server; the local memory still hides it for this session.

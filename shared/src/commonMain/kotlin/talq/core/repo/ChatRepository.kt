@@ -4,7 +4,6 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,6 +45,8 @@ data class OutboxMessage(
     val error: TalkError? = null,
     /** Not empty: this message starts a new topic with this title (then [threadId] is 0). */
     val threadTitle: String = "",
+    /** Sent without notifying anyone (capability `silent-send`); a retry keeps it. */
+    val silent: Boolean = false,
 )
 
 data class ChatState(
@@ -143,12 +144,31 @@ class ChatRepository internal constructor(
             launch(start = CoroutineStart.UNDISPATCHED) { feed.incoming.collect { ingest(it) } }
             feed.acquire()
             try {
-                while (!refresh()) delay(RETRY_LOAD_MILLIS)
+                // Again every few seconds, and at once when the network is usable again (also
+                // when that happened while the load was on its way).
+                while (true) {
+                    val wakes = session.waker.mark()
+                    if (refresh()) break
+                    session.waker.pause(RETRY_LOAD_MILLIS, since = wakes)
+                }
                 awaitCancellation()
             } finally {
                 withContext(NonCancellable) { feed.release() }
             }
         }
+    }
+
+    /** A screen shows this repository (between [start] and [stop]): its feed brings what is new. */
+    internal val isLive: Boolean get() = liveUsers.value > 0
+
+    /**
+     * [fresh] (the room's newest page, from its whole chat) holds a message of this scope newer
+     * than any held here, or nothing was loaded here yet: a [refresh] would bring something.
+     */
+    internal fun isBehind(fresh: List<ChatMessage>): Boolean {
+        val s = _state.value
+        val newest = s.messages.lastOrNull()?.id ?: 0L
+        return !s.loaded || fresh.any { it.id > newest && !it.isUpdateSignal && accepts(it) }
     }
 
     /** Undo one [start]. Loaded messages and the outbox stay. */
@@ -282,14 +302,7 @@ class ChatRepository internal constructor(
                 // "Message X changed": the signal's parent is X's new state.
                 val updated = m.parent ?: continue
                 val old = byId[updated.id] ?: continue
-                byId[updated.id] = updated.copy(
-                    parent = old.parent,
-                    parentDeleted = old.parentDeleted,
-                    reactionsSelf = if (updated.raw.containsKey("reactionsSelf")) updated.reactionsSelf else old.reactionsSelf,
-                    threadId = if (updated.raw.containsKey("threadId")) updated.threadId else old.threadId,
-                    isThread = if (updated.raw.containsKey("isThread")) updated.isThread else old.isThread,
-                    threadTitle = updated.threadTitle.ifEmpty { old.threadTitle },
-                )
+                byId[updated.id] = changed(old, updated)
                 continue
             }
             if (m.referenceId.isNotEmpty()) {
@@ -308,6 +321,60 @@ class ChatRepository internal constructor(
         return s.copy(messages = byId.values.sortedBy { it.id }, outbox = outbox)
     }
 
+    /**
+     * [old] as the server now has it ([updated], from an update notice or an edit/delete answer).
+     * What such a copy leaves out is kept: the quote (it is built without its own parent), the
+     * user's own reactions (built without them) and the topic fields when missing.
+     */
+    private fun changed(old: ChatMessage, updated: ChatMessage): ChatMessage = updated.copy(
+        parent = old.parent,
+        parentDeleted = old.parentDeleted,
+        reactionsSelf = if (updated.raw.containsKey("reactionsSelf")) updated.reactionsSelf else old.reactionsSelf,
+        threadId = if (updated.raw.containsKey("threadId")) updated.threadId else old.threadId,
+        isThread = if (updated.raw.containsKey("isThread")) updated.isThread else old.isThread,
+        threadTitle = updated.threadTitle.ifEmpty { old.threadTitle },
+    )
+
+    /**
+     * A message held here changed (the user's own edit or delete, from the server's answer): put
+     * its new state in place. By id only: nothing else moves, the newest id seen stays as it was
+     * (a jump there could hide a gap in a view that is not live), and a message not held is left.
+     */
+    internal fun applyChange(updated: ChatMessage) {
+        _state.update { s ->
+            if (s.messages.none { it.id == updated.id }) s
+            else s.copy(messages = s.messages.map { if (it.id == updated.id) changed(it, updated) else it })
+        }
+    }
+
+    // ---------------------------------------------------------------- editing and deleting
+
+    /**
+     * Save [text] as the new text of the user's message [messageId] (`PUT /chat/{token}/{id}`). On
+     * success every view of the room shows the server's new state at once (the live feed's notice
+     * comes later and changes nothing more); returns null. A refusal changes nothing and is returned.
+     */
+    suspend fun edit(messageId: Long, text: String): TalkError? = try {
+        client.editMessage(token, messageId, text)?.let { afterChange(it) }
+        null
+    } catch (e: TalkError) {
+        e
+    }
+
+    /** Delete the user's message [messageId]; on success every view shows it as deleted. As [edit]. */
+    suspend fun delete(messageId: Long): TalkError? = try {
+        client.deleteMessage(token, messageId)?.let { afterChange(it) }
+        null
+    } catch (e: TalkError) {
+        e
+    }
+
+    /** The conversation list shows the room's last message: when that changed, it is reloaded (not awaited). */
+    private fun afterChange(updated: ChatMessage) {
+        session.applyChange(token, updated)
+        if (session.rooms.room(token)?.lastMessage?.id == updated.id) session.scope.launch { session.rooms.refresh() }
+    }
+
     // ---------------------------------------------------------------- sending
 
     /**
@@ -319,18 +386,25 @@ class ChatRepository internal constructor(
      * With a [threadTitle] the message starts a NEW topic of that name instead, whatever the
      * scope (a topic only exists once its first post carries the title); a quote is dropped.
      * The new topic's id is reported in [createdTopics] under the returned key, and a retry
-     * after a failure carries the title again.
+     * after a failure carries the title again. [silent] sends it without notifying anyone (the
+     * caller checks the `silent-send` capability); a retry keeps that too.
      * Returns the outbox key.
      */
-    fun send(text: String, replyTo: ChatMessage? = null, threadTitle: String = ""): String {
+    fun send(text: String, replyTo: ChatMessage? = null, threadTitle: String = "", silent: Boolean = false): String {
         val title = threadTitle.trim()
         val quote = replyTo.takeIf { title.isEmpty() }
-        val thread = if (title.isNotEmpty()) 0L else topicId.takeIf { it > 0 } ?: replyTo?.topicId ?: 0L
-        val entry = OutboxMessage(newReferenceId(), text, quote, thread, OutboxStatus.SENDING, threadTitle = title)
+        val thread = if (title.isNotEmpty()) 0L else topicFor(replyTo)
+        val entry = OutboxMessage(newReferenceId(), text, quote, thread, OutboxStatus.SENDING, threadTitle = title, silent = silent)
         _state.update { it.copy(outbox = it.outbox + entry) }
         launchSend(entry)
         return entry.referenceId
     }
+
+    /**
+     * The topic a message from this view goes into: in a topic scope that topic; elsewhere the
+     * topic of the message it replies to (a quote alone would not put it there); else 0.
+     */
+    fun topicFor(replyTo: ChatMessage?): Long = topicId.takeIf { it > 0 } ?: replyTo?.topicId ?: 0L
 
     /** Try a FAILED outbox entry again, with everything it was first sent with. */
     fun retry(referenceId: String) {
@@ -355,6 +429,7 @@ class ChatRepository internal constructor(
                     threadId = entry.threadId,
                     threadTitle = entry.threadTitle,
                     referenceId = entry.referenceId,
+                    silent = entry.silent,
                 ).let { m ->
                     // The first post of a new topic IS the topic: make sure it reads that way
                     // whatever the answer carried, so no view files it under General.

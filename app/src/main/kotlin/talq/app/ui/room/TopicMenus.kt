@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import talq.app.theme.TalqTheme
 import talq.app.ui.chat.Composer
+import talq.app.ui.chat.MentionSuggester
 import talq.app.ui.common.MessagePane
 import talq.app.ui.message.PendingRow
 import talq.core.model.NotificationLevel
@@ -237,11 +238,12 @@ fun DraftTopicPane(
     onSend: () -> Unit,
     onRetry: () -> Unit,
     onEditAgain: () -> Unit,
+    mentions: MentionSuggester? = null,
 ) {
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
             if (pending != null) {
-                PendingRow(outbox = pending, onRetry = onRetry, onDiscard = onEditAgain)
+                PendingRow(outbox = pending, onRetry = onRetry, onDiscard = onEditAgain, text = mentions?.readable(pending.text) ?: pending.text)
             } else if (!sending) {
                 MessagePane(
                     title = title,
@@ -257,6 +259,7 @@ fun DraftTopicPane(
                 onCancelReply = {},
                 onSend = onSend,
                 placeholder = "First message in $title…",
+                mentions = mentions,
             )
         }
     }

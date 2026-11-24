@@ -127,8 +127,7 @@ private fun SoundPicker(ring: Boolean, current: Sound, onDone: (Sound?) -> Unit)
                 }
                 Choice("Silent", chosen == Sound.Silent) { pick(Sound.Silent) }
                 Text(
-                    "Changing the sound starts this kind of notification's Android settings (importance, " +
-                        "vibration) again from the app's defaults.",
+                    "A new sound resets this notification's Android settings.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TalqTheme.colors.textMuted,
                     modifier = Modifier.padding(top = 8.dp),

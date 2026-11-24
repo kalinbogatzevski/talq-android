@@ -19,7 +19,8 @@ sealed interface PushStatus {
     /** Registered and activated: notifications arrive while the app is closed. */
     data object Active : PushStatus
 
-    data class Error(val message: String) : PushStatus
+    /** [network]: it failed for want of a connection, so it is tried again when the network is back. */
+    data class Error(val message: String, val network: Boolean = false) : PushStatus
 }
 
 /**
@@ -47,7 +48,7 @@ interface PushRegistrar {
      */
     fun onSessionLost() {}
 
-    /** Start the registration again (the "Try again" button in settings). Does not suspend. */
+    /** Start the registration again ("Try again" in settings, the network back). Does not suspend. */
     fun retry() {}
 
     /** The routes and the one in use, for Settings. Kept up to date by the registrar. */

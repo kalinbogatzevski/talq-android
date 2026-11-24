@@ -3,6 +3,7 @@ package talq.app.theme
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 
 /**
  * TalQ's palette, ported from TalQ for desktop's design system (same author, Apache-2.0:
@@ -33,7 +34,7 @@ data class TalqColors(
     val textMuted: Color,
     // The one signal
     val accent: Color,
-    /** Ink on an accent fill. */
+    /** Ink on an accent fill (icons, the send button). For text on a fill, use [inkOn]. */
     val controlInk: Color,
     /** The accent when it is painted as text (corrected for contrast on the light theme). */
     val accentText: Color,
@@ -51,8 +52,39 @@ data class TalqColors(
     /** Author identity hues, as text on [bgPrimary]. */
     val authorInks: List<Color>,
 ) {
+    /**
+     * The fill behind `inline code` in running text: the ink itself, faint, so it sits on both
+     * bubble fills (a peer's and your own) in every theme. [codeBg] stays for fenced blocks; as an
+     * inline fill it was a near-black hole on the dark themes. Decided difference from desktop,
+     * which paints [codeBg] behind both.
+     */
+    val codeSpan: Color get() = textPrimary.copy(alpha = if (isLight) 0.07f else 0.10f)
+
+    /**
+     * The fill of an unread count: [accentText], the accent deepened for the light theme (the same
+     * as [accent] on the dark ones), so its light [inkOn] ink reads (6.4:1 on Paper). The plain
+     * Paper teal forced dark digits, which the owner found hard to read.
+     */
+    val countFill: Color get() = accentText
+
     /** Stable identity colour for a name or id. */
     fun authorInk(key: String): Color = authorInks[(key.hashCode() and 0x7fffffff) % authorInks.size]
+
+    /**
+     * The ink for text on [fill]: [controlInk] or [textPrimary], whichever contrasts more (TalQ for
+     * desktop's PainterTheme::inkOn). Use it for every badge on an accent, danger or amber fill:
+     * [controlInk] is tuned for the dark themes' accent, and on Paper's teal it is about 3.7:1, under
+     * AA; [textPrimary] is 4.8:1 there. Every theme's accent, danger and amber clear 4.5:1 this way.
+     */
+    fun inkOn(fill: Color): Color =
+        if (contrast(fill, controlInk) >= contrast(fill, textPrimary)) controlInk else textPrimary
+}
+
+/** WCAG contrast ratio of two opaque colours. */
+private fun contrast(a: Color, b: Color): Float {
+    val la = a.luminance()
+    val lb = b.luminance()
+    return (maxOf(la, lb) + 0.05f) / (minOf(la, lb) + 0.05f)
 }
 
 /** Avatar disc fills (white initials go on top). Shared by both themes. */

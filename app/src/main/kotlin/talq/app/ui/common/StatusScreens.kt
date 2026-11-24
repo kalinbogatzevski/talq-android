@@ -65,7 +65,14 @@ fun MessagePane(title: String, detail: String, action: String? = null, onAction:
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        // An explicit colour: the empty pane beside the list has no Surface above it, so the
+        // inherited content colour there is black, unreadable on the dark themes.
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center,
+        )
         Spacer(Modifier.height(6.dp))
         Text(
             detail,

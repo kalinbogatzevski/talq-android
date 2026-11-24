@@ -35,6 +35,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import talq.app.appContainer
+import talq.app.files.RecordingState
 import talq.app.files.newMediaPlayer
 import talq.core.model.RichObject
 import talq.core.repo.TalkSession
@@ -65,7 +66,8 @@ fun VideoPlayer(
             newMediaPlayer(context.applicationContext, session.files).apply {
                 setMediaItem(MediaItem.fromUri(session.files.davUrl(file.path)), startAtMs.coerceAtLeast(0))
                 prepare()
-                playWhenReady = true
+                // Not by itself while a voice message is recorded (it would be in the message).
+                playWhenReady = context.appContainer.voiceMessages.state.value !is RecordingState.Recording
             }
         }
         DisposableEffect(exo) {

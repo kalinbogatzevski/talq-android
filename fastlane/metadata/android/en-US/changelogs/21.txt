@@ -1,0 +1,1 @@
+0.6.4: for organisation builds with their own update channel, Update downloads the new version through Android's download manager; tap the finished download to install.

@@ -141,6 +141,11 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 .build()
         }
 
+        /** Take down the "wasn't sent" notification (the files are going again). */
+        fun clearFailureNotice(context: Context) {
+            NotificationManagerCompat.from(context).cancel(FAILED_NOTIFICATION_ID)
+        }
+
         /** Nobody is looking and something did not go out: say so, with a way back to it. */
         @SuppressLint("MissingPermission") // checked through areNotificationsEnabled()
         private fun announceFailures(context: Context, pending: List<PendingUpload>) {

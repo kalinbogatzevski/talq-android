@@ -97,6 +97,35 @@ data class TalkCapabilities(
     /** The shared-items endpoints (`/chat/{token}/share...`) exist. */
     val sharedItems: Boolean get() = has("rich-object-list-media")
 
+    /** A chat message can be sent without notifying anyone (`silent` on the send). */
+    val silentSend: Boolean get() = has("silent-send")
+
+    /** The user's own "Note to self" conversation can be asked for (`GET room/note-to-self` makes it). */
+    val noteToSelf: Boolean get() = has("note-to-self")
+
+    /** The `/chat/{token}/schedule` family (list, schedule, edit, delete) exists. */
+    val scheduledMessages: Boolean get() = has("scheduled-messages")
+
+    /**
+     * A shared file can be flagged as a voice message (`talkMetaData.messageType` =
+     * `voice-message`); the server keeps the flag only for audio/mpeg and audio/wav.
+     */
+    val voiceMessages: Boolean get() = has("voice-message-sharing")
+
+    private val userStatusCaps: JsonObject? get() = raw.obj("capabilities")?.obj("user_status")
+
+    /**
+     * The user status app is on (its `user_status` capabilities are there), so the own status can be
+     * read and set. `enabled` only counts when it says false.
+     */
+    val userStatus: Boolean get() = userStatusCaps?.bool("enabled", true) ?: false
+
+    /** `user_status.supports_busy`: "busy" may be set as a status type. */
+    val userStatusBusy: Boolean get() = userStatusCaps?.bool("supports_busy") ?: false
+
+    /** `user_status.supports_emoji`: a custom message may carry an emoji (true when the server says nothing). */
+    val userStatusEmoji: Boolean get() = userStatusCaps?.bool("supports_emoji", true) ?: true
+
     /** `spreed.config.attachments`: whether and where this user may upload files for a chat. */
     val attachments: AttachmentConfig
         get() {

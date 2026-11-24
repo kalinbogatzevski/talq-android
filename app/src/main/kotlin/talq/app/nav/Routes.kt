@@ -11,8 +11,9 @@ data object LoginRoute
 @Serializable
 data object ChatListRoute
 
+/** [notifications]: opened by the list's "Notifications aren't working" Fix, scrolled to that section. */
 @Serializable
-data object SettingsRoute
+data class SettingsRoute(val notifications: Boolean = false)
 
 /** Settings > Diagnostics: connection checks and the report for support. */
 @Serializable

@@ -27,8 +27,15 @@ import talq.core.call.SignalingSettings
 import talq.core.model.ChatMessage
 import talq.core.model.ChatPage
 import talq.core.model.Credentials
+import talq.core.model.MENTION_FETCH_LIMIT
+import talq.core.model.MentionCandidate
+import talq.core.model.isMentionable
+import talq.core.model.OwnStatus
+import talq.core.model.PersonMatch
+import talq.core.model.PredefinedStatus
 import talq.core.model.ReactionActor
 import talq.core.model.Room
+import talq.core.model.ScheduledMessage
 import talq.core.model.TalkCapabilities
 import talq.core.model.TalkNotification
 import talq.core.model.TalkThreadInfo
@@ -117,7 +124,10 @@ class TalkClient(
                 header("OCS-APIRequest", "true")
                 header("Accept", "application/json")
                 header("Authorization", authorizationHeader)
-                for ((k, v) in query) if (v != null) parameter(k, v)
+                // A list repeats its key (`shareTypes[]=0&shareTypes[]=1`).
+                for ((k, v) in query) {
+                    if (v is Iterable<*>) v.forEach { if (it != null) parameter(k, it) } else if (v != null) parameter(k, v)
+                }
                 if (body != null) setBody(TextContent(body.toString(), ContentType.Application.Json))
                 if (timeoutMillis != null) timeout {
                     requestTimeoutMillis = timeoutMillis
@@ -288,6 +298,54 @@ class TalkClient(
         ocs(HttpMethod.Delete, "core/apppassword")
     }
 
+    // ---------------------------------------------------------------- own status (user_status app, capability `user_status`)
+
+    /** The user's own status; null when the server has none for them yet (404). */
+    suspend fun ownStatus(): OwnStatus? {
+        val r = ocsRaw(HttpMethod.Get, USER_STATUS)
+        if (r.status == 404) return null
+        if (!r.isSuccess) throw errorFor(r)
+        return OwnStatus.fromJson(r.objectData("user status"))
+    }
+
+    /** The server's predefined status messages, in its order. */
+    suspend fun predefinedStatuses(): List<PredefinedStatus> =
+        ocs(HttpMethod.Get, "apps/user_status/api/v1/predefined_statuses")
+            .data.asArray().mapNotNull { it.asObject() }.mapNotNull { PredefinedStatus.fromJson(it) }
+
+    /** Set the status type ([talq.core.model.StatusType]). */
+    suspend fun setStatusType(statusType: String) {
+        ocs(HttpMethod.Put, "$USER_STATUS/status", body = buildJsonObject { put("statusType", statusType) })
+    }
+
+    /** Use the predefined message [messageId]; [clearAt] in Unix seconds, 0 = never (sent as null). */
+    suspend fun setPredefinedStatusMessage(messageId: String, clearAt: Long) {
+        ocs(
+            HttpMethod.Put, "$USER_STATUS/message/predefined",
+            body = buildJsonObject {
+                put("messageId", messageId)
+                put("clearAt", if (clearAt > 0) JsonPrimitive(clearAt) else JsonNull)
+            },
+        )
+    }
+
+    /** A message of the user's own: [icon] one emoji or empty (then not sent), [clearAt] as for the predefined one. */
+    suspend fun setCustomStatusMessage(icon: String, message: String, clearAt: Long) {
+        ocs(
+            HttpMethod.Put, "$USER_STATUS/message/custom",
+            body = buildJsonObject {
+                if (icon.isNotEmpty()) put("statusIcon", icon)
+                put("message", message)
+                put("clearAt", if (clearAt > 0) JsonPrimitive(clearAt) else JsonNull)
+            },
+        )
+    }
+
+    /** Remove the status message (and its emoji); the status type stays. */
+    suspend fun clearStatusMessage() {
+        ocs(HttpMethod.Delete, "$USER_STATUS/message")
+    }
+
     // ---------------------------------------------------------------- rooms (v4)
 
     suspend fun rooms(includeStatus: Boolean = false, noStatusUpdate: Boolean = true): List<Room> =
@@ -298,6 +356,83 @@ class TalkClient(
 
     suspend fun room(token: String): Room =
         Room.fromJson(ocs(HttpMethod.Get, "apps/spreed/api/v4/room/${seg(token)}").objectData("room"))
+
+    /**
+     * People to start a conversation with, as TalQ for desktop asks Nextcloud's autocomplete
+     * (ApiClient::searchNcUsers): `itemType=call` with `itemId=new`, share types 0 user, 1 group
+     * and 7 circle, at most 25. Only users, groups and circles are kept.
+     */
+    suspend fun searchPeople(search: String): List<PersonMatch> =
+        ocs(
+            HttpMethod.Get, "core/autocomplete/get",
+            mapOf(
+                "search" to search,
+                "itemType" to "call",
+                "itemId" to "new",
+                "shareTypes[]" to listOf(0, 1, 7),
+                "limit" to 25,
+            ),
+        ).data.asArray().mapNotNull { it.asObject() }.mapNotNull { o ->
+            val id = o.str("id")
+            val source = o.str("source")
+            if (id.isEmpty() || source !in PersonMatch.SOURCES) null else PersonMatch(id, o.str("label"), source)
+        }.distinctBy { it.key }
+
+    /**
+     * Who can be mentioned in [token] for what is typed after "@" ([search] may be empty: the
+     * conversation's people), as TalQ for desktop's ApiClient::fetchMentions asks (`chat` is v1,
+     * limit 20), plus `includeStatus` for the presence disc. Rows without a usable id are left out.
+     * Talk 25.0.7 answers 403 for a read-only conversation and 412 behind a lobby.
+     */
+    suspend fun mentions(token: String, search: String, limit: Int = MENTION_FETCH_LIMIT): List<MentionCandidate> =
+        ocs(
+            HttpMethod.Get, "apps/spreed/api/v1/chat/${seg(token)}/mentions",
+            mapOf("search" to search, "limit" to limit, "includeStatus" to "true"),
+        ).data.asArray().mapNotNull { it.asObject() }.map { o ->
+            MentionCandidate(
+                id = o.str("id"),
+                mentionId = o.str("mentionId"),
+                label = o.str("label"),
+                source = o.str("source"),
+                status = o.str("status"),
+                statusIcon = o.str("statusIcon"),
+                statusMessage = o.str("statusMessage"),
+                details = o.str("details"),
+            )
+        }.filter { isMentionable(it) }.distinctBy { it.key }
+
+    /**
+     * Make a conversation and return its token (TalQ for desktop's ApiClient::createRoom, nothing
+     * else in the body): [roomType] 1 with [invite] a user id opens the one-to-one conversation with
+     * that person (an existing one answers 200), 2 with [roomName] makes a group of one, you.
+     */
+    suspend fun createRoom(roomType: Int, roomName: String = "", invite: String = ""): String =
+        ocs(
+            HttpMethod.Post, "apps/spreed/api/v4/room",
+            body = buildJsonObject {
+                put("roomType", roomType)
+                if (roomName.isNotEmpty()) put("roomName", roomName)
+                if (invite.isNotEmpty()) put("invite", invite)
+            },
+        ).objectData("new conversation").str("token").ifEmpty { throw TalkError.Protocol("new conversation: no token") }
+
+    /**
+     * Add [newParticipant] to a group conversation; [source] is where the id came from (`users`,
+     * `groups`, `circles`, as the autocomplete said), as TalQ for desktop's addRoomParticipant sends it.
+     */
+    suspend fun addParticipant(token: String, newParticipant: String, source: String = PersonMatch.USERS) {
+        ocs(
+            HttpMethod.Post, "apps/spreed/api/v4/room/${seg(token)}/participants",
+            body = buildJsonObject {
+                put("newParticipant", newParticipant)
+                put("source", source.ifEmpty { PersonMatch.USERS })
+            },
+        )
+    }
+
+    /** The user's Note to self conversation (capability `note-to-self`); the server makes it on the first ask. */
+    suspend fun noteToSelf(): Room =
+        Room.fromJson(ocs(HttpMethod.Get, "apps/spreed/api/v4/room/note-to-self").objectData("note to self"))
 
     // ---------------------------------------------------------------- chat (v1)
 
@@ -400,10 +535,102 @@ class TalkClient(
         return ChatMessage.fromJson(r.objectData("sent message"))
     }
 
-    /** Set the room's read marker. Null [lastReadMessage] means "everything" (`chat-read-last`). */
-    suspend fun markRead(token: String, lastReadMessage: Long? = null) {
+    /**
+     * Change the text of a sent message (capability `edit-messages`; 24 hours, unlimited in
+     * note-to-self with `edit-messages-note-to-self`). Answers the message as it is now: the
+     * server returns the "message_edited" system message with the edited one as its `parent`.
+     * Null when the answer carries none. A refusal throws with the reason word in its detail
+     * (`age`, `message`, `permission`; 413 too long).
+     */
+    suspend fun editMessage(token: String, messageId: Long, message: String): ChatMessage? {
+        val r = ocs(
+            HttpMethod.Put, "apps/spreed/api/v1/chat/${seg(token)}/$messageId",
+            body = buildJsonObject { put("message", message) },
+        )
+        return changedMessage(r)
+    }
+
+    /**
+     * Delete a sent message (capability `delete-messages`; a file or shared object needs
+     * `rich-object-delete`). Answers the message as it is now ("Message deleted", `deleted`),
+     * from the answer's `parent`, or null.
+     */
+    suspend fun deleteMessage(token: String, messageId: Long): ChatMessage? =
+        changedMessage(ocs(HttpMethod.Delete, "apps/spreed/api/v1/chat/${seg(token)}/$messageId"))
+
+    /** The message an edit or delete answer is about: its `parent`, or the answer itself when it is no notice. */
+    private fun changedMessage(r: OcsResponse): ChatMessage? {
+        val answer = r.data.asObject() ?: return null
+        val changed = ChatMessage.fromJsonOrNull(answer.obj("parent"))
+        if (changed != null) return changed
+        return ChatMessage.fromJsonOrNull(answer)?.takeIf { !it.isSystem }
+    }
+
+    // ---------------------------------------------------------------- scheduled messages (v1, capability `scheduled-messages`)
+
+    /** The user's own messages waiting to be sent in this room. 404 `actor` for guests and self-joined users. */
+    suspend fun scheduledMessages(token: String): List<ScheduledMessage> =
+        ocs(HttpMethod.Get, "apps/spreed/api/v1/chat/${seg(token)}/schedule")
+            .data.asArray().mapNotNull { it.asObject() }.map { ScheduledMessage.fromJson(it) }
+
+    /**
+     * Have the server post [message] at [sendAt] (Unix seconds, in the future). [replyTo] > 0
+     * quotes that message; [threadId] > 0 puts it into that topic. A refusal throws with the
+     * reason word in its detail (`send-at`, `message`, `reply-to`, `actor`; 413 too long).
+     * The answer (the stored message) is not used.
+     */
+    suspend fun scheduleMessage(
+        token: String,
+        message: String,
+        sendAt: Long,
+        replyTo: Long = 0,
+        threadId: Long = 0,
+        silent: Boolean = false,
+    ) {
+        ocs(
+            HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}/schedule",
+            body = buildJsonObject {
+                put("message", message)
+                put("sendAt", sendAt)
+                if (replyTo > 0) put("replyTo", replyTo)
+                if (silent) put("silent", true)
+                if (threadId > 0) put("threadId", threadId)
+            },
+        )
+    }
+
+    /**
+     * Change a scheduled message's text and time. [silent] is always sent, false included: the
+     * server replaces the stored flag with whatever arrives. No `threadTitle`: an empty one keeps
+     * the stored title, and a non-empty one on a message that starts no topic is refused.
+     */
+    suspend fun editScheduledMessage(token: String, id: String, message: String, sendAt: Long, silent: Boolean) {
+        ocs(
+            HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}/schedule/${seg(id)}",
+            body = buildJsonObject {
+                put("message", message)
+                put("sendAt", sendAt)
+                put("silent", silent)
+            },
+        )
+    }
+
+    /** Take a scheduled message back. 404 `message` when it was sent or deleted already. */
+    suspend fun deleteScheduledMessage(token: String, id: String) {
+        ocs(HttpMethod.Delete, "apps/spreed/api/v1/chat/${seg(token)}/schedule/${seg(id)}")
+    }
+
+    /**
+     * Set the room's read marker. Null [lastReadMessage] means "everything" (`chat-read-last`).
+     * The server writes the id as given, also an older one: never send two of these at once for a room.
+     * Answers the room as it is after the move (its unread numbers) where the server sends it
+     * (`federation-v1`, chat.md "Mark chat as read"), else null.
+     */
+    suspend fun markRead(token: String, lastReadMessage: Long? = null): Room? {
         val body = buildJsonObject { if (lastReadMessage != null) put("lastReadMessage", lastReadMessage) }
-        ocs(HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}/read", body = body)
+        val r = ocs(HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}/read", body = body)
+        val room = r.data.asObject()?.takeIf { it.str("token") == token } ?: return null
+        return runCatching { Room.fromJson(room) }.getOrNull()
     }
 
     /** Who reacted to a message: emoji -> actors. The counts are already on [ChatMessage.reactions]. */
@@ -577,6 +804,8 @@ class TalkClient(
     private fun seg(s: String): String = s.encodeURLPathPart()
 
     companion object {
+        private const val USER_STATUS = "apps/user_status/api/v1/user_status"
+
         /** "cloud.example.com/index.php/apps/..." -> "https://cloud.example.com" */
         fun normalizeServerUrl(input: String): String {
             var s = input.trim()

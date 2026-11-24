@@ -1,0 +1,1 @@
+0.9.1: Forward a message straight from its touch-and-hold menu. On the light theme, unread numbers are now light on a deeper teal, easy to read.

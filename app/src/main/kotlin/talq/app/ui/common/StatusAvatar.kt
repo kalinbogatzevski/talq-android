@@ -53,6 +53,8 @@ fun presenceWord(status: String): String = when (status) {
     "away" -> "Away"
     "dnd" -> "Do not disturb"
     "busy" -> "Busy"
+    // Only the user's own status reads so; others see an invisible person as offline.
+    "invisible" -> "Invisible"
     else -> "Offline"
 }
 
@@ -98,6 +100,8 @@ fun statusDescription(presence: String, shift: ShiftState): String {
  * @param ring the colour of the ground the avatar sits on: each mark is ringed in it, so it
  *   reads against any picture behind it
  * @param presence the room's `status` (`online`, `away`, `dnd`, `busy`, ...)
+ * @param everyState the user's own avatar: the disc is drawn for every known state, offline and
+ *   invisible in the muted ink (TalQ for desktop's own status dot); others show none for those
  */
 @Composable
 fun StatusAvatar(
@@ -109,9 +113,10 @@ fun StatusAvatar(
     size: Dp = 48.dp,
     presence: String = "",
     shift: ShiftState = ShiftState.Unknown,
+    everyState: Boolean = false,
 ) {
     val colors = TalqTheme.colors
-    val dot = presenceColor(presence, colors)
+    val dot = presenceColor(presence, colors) ?: colors.textMuted.takeIf { everyState && presence.isNotEmpty() }
     val square = shiftColor(shift, colors)
     val description = statusDescription(presence, shift)
     Box(

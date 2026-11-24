@@ -2,6 +2,8 @@ package talq.app.diag
 
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -31,6 +33,7 @@ import talq.core.call.IceServer
 import talq.core.net.newHpbHttpClient
 import talq.core.repo.TalkSession
 import java.net.Inet6Address
+import java.security.MessageDigest
 import java.net.URI
 
 /** How a check came out. Every state has its own colour on screen (never a plain "normal"). */
@@ -84,7 +87,59 @@ class Diagnostics(private val context: Context, private val container: AppContai
         return listOf(
             Check(APP, "${Brand.appName(context)} ${BuildConfig.VERSION_NAME}", "Build ${BuildConfig.VERSION_CODE}, $flavor", Health.Info),
             Check(APP, "${Build.MANUFACTURER} ${Build.MODEL}", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})", Health.Info),
+            googleServicesCheck(),
+            containerCheck(),
         )
+    }
+
+    /**
+     * Google Play services as this phone has it: Google's own, one signed by someone else (microG,
+     * or what an emulator app such as GBox brings), or none. Push through Google looks the same to
+     * the server in every case; this tells them apart.
+     */
+    private fun googleServicesCheck(): Check {
+        val pm = context.packageManager
+        val info = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                pm.getPackageInfo(GMS_PACKAGE, PackageManager.GET_SIGNING_CERTIFICATES)
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(GMS_PACKAGE, PackageManager.GET_SIGNATURES)
+            }
+        } catch (_: PackageManager.NameNotFoundException) {
+            return Check(APP, "Google services", "None on this phone", Health.Info)
+        }
+        val signers: Array<Signature>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.let { if (it.hasMultipleSigners()) it.apkContentsSigners else it.signingCertificateHistory }
+        } else {
+            @Suppress("DEPRECATION")
+            info.signatures
+        }
+        val google = signers.orEmpty().any { sha1(it.toByteArray()) in GOOGLE_GMS_CERTS }
+        val version = info.versionName?.substringBefore(' ')?.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty()
+        return when {
+            info.applicationInfo?.enabled == false ->
+                Check(APP, "Google services", "Google Play services$version is installed but switched off", Health.Warn)
+            google -> Check(APP, "Google services", "Google Play services$version, Google's own", Health.Info)
+            else -> Check(APP, "Google services", "Google Play services$version, not signed by Google: a replacement such as microG", Health.Info)
+        }
+    }
+
+    /**
+     * Whether this app runs inside another app: emulator apps such as GBox or Gspace keep the apps
+     * they run in their own folder (and under their own Android user id). An update must then be
+     * installed from inside that app, and that app must be let run in the background.
+     */
+    private fun containerCheck(): Check {
+        val own = context.packageName
+        val fromFolder = HOST_IN_PATH.find(context.applicationInfo.dataDir.orEmpty())?.groupValues?.get(1)
+        val fromUid = runCatching { context.packageManager.getNameForUid(android.os.Process.myUid()) }.getOrNull()?.substringBefore(':')
+        val host = fromFolder?.takeIf { it != own } ?: fromUid?.takeIf { it.isNotBlank() && it != own }
+        return if (host == null) {
+            Check(APP, "Inside another app", "No, it runs on its own", Health.Info)
+        } else {
+            Check(APP, "Inside another app", "Yes, inside $host: install updates from inside that app, and let it run in the background", Health.Warn)
+        }
     }
 
     private suspend fun serverCheck(session: TalkSession): Check {
@@ -262,6 +317,16 @@ class Diagnostics(private val context: Context, private val container: AppContai
         const val APP = "App"
         const val SERVER = "Server"
         const val PUSH = "Push and notifications"
+        const val GMS_PACKAGE = "com.google.android.gms"
+
+        /** SHA-1 of the certificate Google signs Google Play services with. */
+        val GOOGLE_GMS_CERTS = setOf("38918a453d07199354f8b19af05ec6562ced5788")
+
+        /** An app's own data folder: /data/user/<n>/<package>, /data/user_de/<n>/<package> or /data/data/<package>. */
+        val HOST_IN_PATH = Regex("^/data/(?:user(?:_de)?/\\d+|data)/([^/]+)")
+
+        fun sha1(bytes: ByteArray): String =
+            MessageDigest.getInstance("SHA-1").digest(bytes).joinToString("") { "%02x".format(it) }
         const val CALLS = "Calls"
         const val NETWORK = "Network"
         const val SHIFT = "Shift status"

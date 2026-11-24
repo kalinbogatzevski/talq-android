@@ -1,0 +1,1 @@
+0.6.5: Settings > Diagnostics shows whether Google Play services is Google's own or a replacement, and whether the app runs inside another app.

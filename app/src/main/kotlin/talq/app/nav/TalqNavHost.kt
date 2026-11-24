@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -32,7 +33,9 @@ import talq.app.SessionState
 import talq.app.push.NotificationPermissionPrompt
 import talq.app.ui.adaptive.LocalTwoPane
 import talq.app.ui.adaptive.TwoPane
+import androidx.lifecycle.viewmodel.compose.viewModel
 import talq.app.ui.chatlist.ChatListScreen
+import talq.app.ui.chatlist.NewConversationModel
 import talq.app.ui.common.LoadingScreen
 import talq.app.ui.common.MessagePane
 import talq.app.ui.common.UnreachableScreen
@@ -80,8 +83,20 @@ fun TalqNavHost(container: AppContainer, signedIn: Boolean) {
     val pending by container.pendingDeepLink.collectAsStateWithLifecycle()
     val current by nav.currentBackStackEntryAsState()
     // A topic picked in the wide layout's list for the conversation already open: switched to
-    // in place (reopening the conversation would lose its drafts).
+    // in place (reopening the conversation would lose its scroll positions; drafts are kept).
     val tabRequest = remember { mutableStateOf<TabRequest?>(null) }
+    // The conversation list's search text, one holder for both places the list is drawn (beside
+    // the rooms, or as the first screen), so a resize keeps it. Emptied at sign-out.
+    val listSearch = rememberSaveable { mutableStateOf("") }
+    // The list's "+" sheet model, likewise one for both places (here: the activity's store), so a
+    // resize while a request runs keeps its answer. Forgotten at sign-out.
+    val newChat: NewConversationModel = viewModel(key = "new-conversation")
+    LaunchedEffect(signedIn) {
+        if (!signedIn) {
+            listSearch.value = ""
+            newChat.signedOut()
+        }
+    }
 
     // The stack must match the session: Login alone when signed out, never Login when signed
     // in. Compared against what is really on screen, not a remembered flag: a back stack
@@ -97,6 +112,11 @@ fun TalqNavHost(container: AppContainer, signedIn: Boolean) {
         val link = pending
         if (signedIn && link != null) {
             container.pendingDeepLink.value = null
+            // A conversation in a closed folder opens that folder (desktop does so for a chat that
+            // is opened), so it is in view when the list is back. Only for one the list shows;
+            // after a cold start from a notification the list has not answered yet, so the folders
+            // wait for its first answer. Nothing happens while folders are not shown.
+            container.session?.let { container.folders.revealWhenListed(it, link.token) }
             nav.openDeepLink(link, tabRequest)
         }
     }
@@ -111,6 +131,8 @@ fun TalqNavHost(container: AppContainer, signedIn: Boolean) {
             if (session != null) {
                 ChatListScreen(
                     session = session,
+                    search = listSearch,
+                    newChat = newChat,
                     selectedToken = current?.openToken() ?: current?.takeIf { it.destination.hasRoute<SettingsRoute>() }
                         ?.let { nav.previousBackStackEntry?.openToken() },
                     onOpenRoom = { token -> if (nav.topIsResumed()) nav.selectRoom(token) },
@@ -124,19 +146,21 @@ fun TalqNavHost(container: AppContainer, signedIn: Boolean) {
                             }
                         }
                     },
-                    onOpenSettings = { if (nav.topIsResumed()) nav.navigate(SettingsRoute) { launchSingleTop = true } },
+                    onOpenSettings = { if (nav.topIsResumed()) nav.navigate(SettingsRoute()) { launchSingleTop = true } },
+                    onOpenPushSettings = { if (nav.topIsResumed()) nav.navigate(SettingsRoute(notifications = true)) { launchSingleTop = true } },
                     onUnauthorized = container::onUnauthorized,
                 )
             }
         },
     ) {
-        TalqGraph(container, nav, start, tabRequest)
+        TalqGraph(container, nav, start, tabRequest, listSearch, newChat)
     }
 }
 
 /**
- * The navigation graph. [tabRequest] is a state holder, read and written inside the destinations:
- * a changing value captured by the builder would rebuild the graph.
+ * The navigation graph. [tabRequest] and [listSearch] are state holders, read and written inside
+ * the destinations, and [newChat] is one stable instance: a changing value captured by the builder
+ * would rebuild the graph.
  */
 @Composable
 private fun TalqGraph(
@@ -144,6 +168,8 @@ private fun TalqGraph(
     nav: NavHostController,
     start: Any,
     tabRequest: MutableState<TabRequest?>,
+    listSearch: MutableState<String>,
+    newChat: NewConversationModel,
 ) {
     NavHost(navController = nav, startDestination = start) {
         // Signing in swaps the login screen for the list without the usual fade: on a wide
@@ -164,9 +190,12 @@ private fun TalqGraph(
             }
             ChatListScreen(
                 session = session,
+                search = listSearch,
+                newChat = newChat,
                 onOpenRoom = { token -> if (entry.isResumed()) nav.openRoom(token) },
                 onOpenTopic = { token, topicId -> if (entry.isResumed()) nav.openRoom(token, RoomTab.Topic(topicId)) },
-                onOpenSettings = { if (entry.isResumed()) nav.navigate(SettingsRoute) },
+                onOpenSettings = { if (entry.isResumed()) nav.navigate(SettingsRoute()) },
+                onOpenPushSettings = { if (entry.isResumed()) nav.navigate(SettingsRoute(notifications = true)) },
                 onUnauthorized = container::onUnauthorized,
             )
         }
@@ -176,6 +205,7 @@ private fun TalqGraph(
             SettingsScreen(
                 session = session,
                 push = container.pushRegistrar,
+                showNotifications = entry.toRoute<SettingsRoute>().notifications,
                 onBack = { nav.back(entry) },
                 onOpenDiagnostics = { if (entry.isResumed()) nav.navigate(DiagnosticsRoute) },
                 // On the container's scope: leaving this screen must not cancel the sign-out.
@@ -193,8 +223,12 @@ private fun TalqGraph(
             val activity = LocalActivity.current
             // Beside the list, back from a conversation leaves the app, as back from the list
             // does on a phone: the list is already on screen. Composed before the room's own
-            // back handlers (an open sheet, a draft topic), so those still come first.
-            BackHandler(enabled = twoPane) { activity?.moveTaskToBack(true) }
+            // back handlers (an open sheet, a draft topic), so those still come first. A search in
+            // the list beside is emptied first, as Back does on the list itself (whichever of the
+            // two handlers Android asks first).
+            BackHandler(enabled = twoPane) {
+                if (listSearch.value.isNotEmpty()) listSearch.value = "" else activity?.moveTaskToBack(true)
+            }
             RoomHostScreen(
                 session = session,
                 route = entry.toRoute<RoomRoute>(),
@@ -254,7 +288,7 @@ private fun NavHostController.openDeepLink(link: DeepLink, tabRequest: MutableSt
  * [openRoom], except for the conversation that is already open (a notification, a share or
  * "Show in chat" about it): that one comes back to the front as it is, switches to [tab] and
  * scrolls to [messageId] in place. Opening it afresh would make a new back-stack entry and
- * lose every tab's unsent text.
+ * lose every tab's place (the unsent text waits in `ComposerDrafts`).
  */
 private fun NavHostController.showInRoom(token: String, tab: RoomTab?, messageId: Long?, tabRequest: MutableState<TabRequest?>) {
     if (openRoomToken() == token) {

@@ -53,6 +53,9 @@ fun NotificationPermissionPrompt() {
     )
 }
 
+/** The question above is still to come (Android 13+, not granted, never asked): nothing should warn before it. */
+fun notificationPromptPending(context: Context): Boolean = shouldAsk(context)
+
 private fun shouldAsk(context: Context): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
     val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==

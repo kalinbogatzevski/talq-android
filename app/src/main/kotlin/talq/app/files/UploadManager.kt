@@ -80,6 +80,8 @@ private data class UploadRecord(
     val caption: String = "",
     /** The outbox key of the last attempt: the server echoes it on the posted message. */
     val referenceId: String = "",
+    /** Posted as a voice message (a recording); kept so a retry after a restart still is one. */
+    val voiceMessage: Boolean = false,
 )
 
 /**
@@ -252,7 +254,10 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         return Staged(out, count - out.size - unprepared, unprepared)
     }
 
-    /** Hand already staged files to the room's outbox and start the background work. */
+    /**
+     * Hand already staged files to the room's outbox and start the background work.
+     * [voiceMessage]: post them as voice messages (a recording, see `VoiceMessages`).
+     */
     fun enqueue(
         session: TalkSession,
         token: String,
@@ -260,13 +265,14 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         staged: List<StagedFile>,
         caption: String,
         replyTo: ChatMessage? = null,
+        voiceMessage: Boolean = false,
     ) {
         if (staged.isEmpty()) return
         startedFresh = false
         watch(session, token)
         val outbox = session.fileOutbox(token)
         val keys = outbox.send(
-            staged.map { FileToSend(FileByteSource(File(it.path)), it.name, it.mimeType, tag = it.path) },
+            staged.map { FileToSend(FileByteSource(File(it.path)), it.name, it.mimeType, tag = it.path, voiceMessage = voiceMessage) },
             caption = caption,
             threadId = threadId,
             replyTo = replyTo,
@@ -279,6 +285,7 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
                 UploadRecord(
                     id = keys[i], account = account, token = token, threadId = threadId, path = f.path, name = f.name,
                     mimeType = f.mimeType, size = f.size, caption = if (i == 0) trimmed else "", referenceId = keys[i],
+                    voiceMessage = voiceMessage,
                 )
             }
         }
@@ -298,6 +305,24 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         } else {
             scope.launch { resume(current, listOf(record)) }
         }
+    }
+
+    /**
+     * The network is usable again: every file that failed for want of a connection goes again, in
+     * the order it was queued (a chunked upload goes on after its last complete chunk; a post whose
+     * answer was lost is looked up by its referenceId first, so nothing is posted twice). A refusal
+     * (403, a full storage, a file that could not be read) still waits for the user's Retry, and a
+     * file left over from an earlier process for the upload worker.
+     */
+    fun retryNetworkFailures() {
+        val current = session() ?: return
+        if (watchedSession !== current) return
+        val failed = live.value.values.filter { (it.state as? FileSendState.Failed)?.error is TalkError.Network }
+        if (failed.isEmpty()) return
+        for (entry in failed) current.fileOutbox(entry.token).retry(entry.referenceId)
+        // Its "wasn't sent" notification is old news; the worker says it again for what still fails.
+        UploadWorker.clearFailureNotice(appContext)
+        UploadWorker.start(appContext)
     }
 
     /** Cancel or give up on a file. */
@@ -358,7 +383,7 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
                         continue
                     }
                     val key = outbox.send(
-                        listOf(FileToSend(FileByteSource(file), record.name, record.mimeType, tag = record.path)),
+                        listOf(FileToSend(FileByteSource(file), record.name, record.mimeType, tag = record.path, voiceMessage = record.voiceMessage)),
                         caption = record.caption,
                         threadId = record.threadId,
                     ).first()

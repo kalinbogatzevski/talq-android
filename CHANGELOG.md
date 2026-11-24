@@ -1,5 +1,144 @@
 # Changelog
 
+## 0.9.1
+
+- **Forward one message** straight from its touch-and-hold menu (no need to Select first).
+- **Fixed**: on the light theme, unread numbers were dark on teal and hard to read; they are now
+  light on a deeper teal.
+
+## 0.9.0
+
+- **Drafts stay in their chat**: text you started, and the message you reply to, wait in their
+  conversation and topic until you send them, also when you go back or open another chat. The
+  list shows "Draft:" with the text. Drafts are kept until you sign out or the app is closed.
+- **Reply opens the keyboard**: swipe a message or tap Reply, and the cursor is in the box.
+- **With a hardware keyboard**, Enter sends, Shift+Enter starts a new line, Alt+Enter sends
+  silently and Esc cancels a reply.
+- **Read up to where you stopped**: a chat counts what has been on screen, also halfway through a
+  long backlog, and the unread counts drop as you scroll.
+- **New messages arrive in view**: at the top of the conversation list, a chat that gets a message
+  shows at the top instead of just above the screen.
+- **Badges show who needs you**: red-orange with "@" when someone mentions you, amber for a mention
+  of everyone; the numbers are easier to read on the light theme. Folder headers show only what is
+  unread, open or closed.
+- **Back online at once**: when the network returns, chats, the conversation list and files that
+  failed for want of a connection carry on by themselves. Meanwhile one line under the header says
+  "No connection", or "Connecting…" while the server does not answer.
+- **A notification opens on its message**: the chat's newest messages load when the notification
+  arrives, so tapping it shows them without waiting.
+- **Notifications off?** The conversation list says so in one line, with Fix to turn them back on.
+- **Photos open at once**: the full-screen picture starts from the copy the chat already shows and
+  sharpens when the large one arrives; if that fails, one line offers Retry.
+- **Calmer to read**: inline code is a faint tint at the size of the text around it, topic tabs lose
+  their letter discs and a muted topic stays quiet, a topic name on the list leaves room for the
+  message, and day and month names are in English like the rest of the app.
+- **With a mouse**, a right-click opens the menu of a message, a chat or a folder, and rows light up
+  under the pointer.
+- **Edit and delete your own messages** from the touch-and-hold menu, while the server still allows
+  it. Edit opens the text in the box under an "Editing" bar; X, Esc or Back cancels it and brings back
+  what you were typing. On a hardware keyboard, Up in an empty box edits your last message.
+- **Type @ to mention someone**: matching people of the conversation, and everyone where the server
+  offers it, show above the box with their status. Tap one, or press Enter or Tab on a keyboard; the
+  box shows the name, and the message notifies that person.
+
+## 0.8.1
+
+- **Your status is at the top of the conversation list**: your picture, name and status sit in
+  the header, as in TalQ for desktop. Tap them to change your status. It is no longer in Settings.
+- **Search your conversations**: the field under the header filters the list by name as you type,
+  ignoring case and accents. Folders stay, shown open. The X or Back clears it.
+- **Start a conversation** with the + in the header: find a person by name and tap them to chat, or
+  pick "New group", name it and add people. "Note to self" is there too where the server offers it.
+- **Fixed**: on a tablet, "Select a conversation" beside the list was black on the dark themes.
+
+## 0.8.0
+
+- **Set your own status**, the same one TalQ for desktop and Nextcloud on the web show. Settings
+  now starts with a Status row: tap it to pick Online, Away, Do not disturb or Invisible (and Busy
+  where the server offers it), set a message with an emoji or pick one of the server's, choose
+  when it clears, or clear it. The phone only changes your status when you set it.
+- **Send silently or later**: touch and hold the send button. "Send silently" notifies no one;
+  "Send later" offers in 1 hour, in 3 hours, tomorrow 8:00 or 18:00, next Monday 9:00, or "Pick a
+  time…". If the server refuses, your text stays in the box and the app says why.
+- **Scheduled messages** in a conversation's menu lists what waits there: edit its text or time, or delete it.
+- **Select several messages**: touch and hold a message, then "Select"; taps add more. The top bar
+  has Copy, Forward and Cancel. Copy puts them on the clipboard in order, each under its author and
+  time. Forward sends them in order to the conversation you pick: a text "Forwarded from" its
+  author, a file shared again.
+- **Voice messages**: with the box empty, the send button is a microphone. Touch and hold to record,
+  let go to send, slide left to discard; or tap to record and tap again to send. A recording goes to
+  the conversation and topic where it started, also when you leave first; under a second is dropped.
+
+## 0.7.1
+
+- **Update starts one download.** Tapping Update again while it downloads did start the download
+  again (three taps, three downloads). The button now shows "Downloading…" and waits; once the
+  download is done, Update opens Downloads, where you tap it to install.
+- **Archived conversations are out of the list**, as in TalQ for desktop and Talk on the web (they
+  used to sit at the end of the list, also inside folders). An "Archived" row at the end shows them.
+- **Shorter texts in Settings**: one line each, for updates, folders, sounds, push, calls and the
+  diagnostics report.
+
+## 0.7.0
+
+- **Folders for your conversations**, the same folders as in TalQ for desktop. Touch and hold a
+  conversation for "Move to folder": pick a folder (the one it is in is checked), make a new one
+  with "New folder…" (the conversation goes into it), or take it out with "Remove from folder". A
+  conversation is in one folder at most.
+- **The list in folders**: each folder is a header with its name and the number of conversations
+  in it, in your order, and "Other" at the end holds the conversations in no folder. Tap a header
+  to close or open the folder. A closed folder shows how many unread messages it holds: red-orange
+  (with "@") when someone mentioned you, amber for another mention, the usual colour otherwise; a
+  conversation set to Never adds nothing. Favourites stay on top inside their folder.
+  A conversation opened from a notification, or open beside the list on a wide screen, opens its
+  folder.
+- **Touch and hold a folder's header** for Rename…, Move up, Move down, Sort folders A to Z and
+  Delete folder (no question asked: its conversations go back to Other). New and renamed folders
+  keep the list in name order until you move one by hand; after that a new folder goes at the end.
+  Up to 50 folders; a name has up to 40 characters (a longer one is shortened, and the app says
+  so), and two folders cannot have the same name, whatever the case. A name with characters the
+  phone does not know yet (newer than its Unicode tables) is refused, so that TalQ for desktop
+  reads it as it was typed.
+- **Settings > Folders > Show folders**: draw the list in folders or flat, on this device. Making
+  your first folder turns it on; turned off, the folders are kept and the list is flat as before.
+- **Settings > Folders > Keep my folders in sync** (for each account, off until you turn it on):
+  keeps your folders the same on this phone and on every other device you turn it on for,
+  including TalQ for desktop. It is the same file desktop uses: one small hidden file,
+  `.talq-folders.json`, in your own Nextcloud Files, with the folders' names, their order, which
+  conversations are in them (by room code; no conversation names or messages) and whether they
+  are open. Nothing about folders goes to the Talk server. Turning it on first checks that your
+  server saves that file safely (with a tiny test file it normally deletes right away); if it does
+  not, or cannot be reached, the switch goes back off and says why. Under the switch: when it last
+  synced, or why it is paused, and "Sync now". Turning it off stops syncing and leaves the file in
+  place. A folder deleted on one device is deleted on the others.
+- **When it syncs**: when the app comes to the front (at most every two minutes), about ten
+  seconds after you change your folders, when the app leaves the front with a change not yet synced,
+  every ten minutes while it is in front, soon after the network comes back (after a failed try,
+  or with a change not yet synced), and with "Sync now". Nothing runs in the background, so a
+  change made on another device arrives the next time you open the app.
+- Folders stay on the phone when you sign out (for each account) and come back when you sign in
+  to the same account again.
+- Not in this version: notices about sync (a change that came from another device, sync paused)
+  appear only in Settings; there is no drag and drop into folders. The folder screens and the sync
+  were built from TalQ for desktop's own rules but had not run on a phone, or against a server and
+  TalQ for desktop together, when 0.7.0 was made.
+
+## 0.6.5
+
+- **Settings > Diagnostics** also tells where Google push comes from: Google Play services
+  signed by Google, a replacement signed by someone else (such as microG, or what an emulator app
+  like GBox brings), or none; and whether the app runs inside another app (such an emulator app
+  keeps the apps it runs in its own folder; updates must then be installed from inside it, and it
+  must be let run in the background). Both are in the shared report.
+
+## 0.6.4
+
+- **Builds with an update channel** (organisation builds, not the store or GitHub ones): "Update"
+  now downloads the new version itself, through Android's own download manager, from the
+  channel's password-protected share (its server allows no public link without a password, which
+  the browser download of 0.6.2 and 0.6.3 needed). When the download is done, tap its notification
+  (or open it in Downloads) and confirm to install; the app still installs nothing itself.
+
 ## 0.6.3
 
 - **Settings > Diagnostics**: what the app can and cannot reach, each line with a coloured dot.
@@ -16,6 +155,8 @@
   app's tones (the same as TalQ for desktop: six message tones, seven ringtones), any sound from
   the phone, or silent. Picking one plays it. A new sound replaces that notification channel, so
   Android's own settings for it (importance, vibration) start again from the app's defaults.
+- Builds with an update channel look for a new version every two hours while the app is in
+  front, also when it stays open all day (0.6.2: twice a day).
 
 ## 0.6.2
 
@@ -32,7 +173,7 @@
 - A conversation list reload that failed is no longer hidden by an older one that worked, and an
   old failure no longer shows over a list that was just reloaded.
 - A branded build learns about its updates from its organisation's own update channel: it looks
-  every two hours (while the app is in front) and offers a newer version at the top of the conversation list and in
+  at most twice a day and offers a newer version at the top of the conversation list and in
   Settings. Update opens the download in the browser; you open the file and Android asks before
   installing it. The app itself installs nothing and asks for no permission to (an unknown app
   that installs other apps is blocked by Google Play Protect). The public app has none of this

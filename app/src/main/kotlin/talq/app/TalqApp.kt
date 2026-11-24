@@ -36,15 +36,22 @@ import talq.app.data.NotifyLevelStore
 import talq.app.data.RoomTabStore
 import talq.app.files.FileNotice
 import talq.app.files.ReceivedFiles
+import talq.app.files.RecordingState
 import talq.app.files.UploadManager
+import talq.app.files.VoiceMessages
 import talq.app.files.VoicePlayer
+import talq.app.folders.FolderController
 import talq.app.nav.DeepLink
+import talq.app.net.NetworkWatch
 import talq.app.push.NoOpPushRegistrar
 import talq.app.push.NotificationGate
 import talq.app.push.PushRegistrar
+import talq.app.push.PushStatus
 import talq.app.push.UnifiedPushRegistrar
 import talq.app.shift.ShiftStatusService
 import talq.app.sound.SoundStore
+import talq.app.status.OwnStatusController
+import talq.app.ui.chat.ComposerDrafts
 import talq.app.update.AppUpdates
 import talq.app.update.newAppUpdates
 import talq.core.TalkError
@@ -81,14 +88,20 @@ class AppContainer(context: Context) {
     /** The tab last open in each conversation (see [RoomTabStore]). */
     val roomTabs = RoomTabStore(appContext, scope)
 
+    /** Unsent text per conversation tab, in memory until it is sent or the account signs out (see [ComposerDrafts]). */
+    val drafts = ComposerDrafts()
+
     /** Files on their way into chats (see [UploadManager]). */
     val uploads = UploadManager(appContext, scope) { session }
 
     /** Files received in chats: downloaded into the cache, opened, shared, saved (see [ReceivedFiles]). */
     val received = ReceivedFiles(appContext, scope) { session }
 
-    /** The one voice message (or audio file) that can be playing. Failing to stream, it is downloaded and opened. */
-    val voice = VoicePlayer(appContext, scope, { session }) { file ->
+    /**
+     * The one voice message (or audio file) that can be playing; none starts while a voice message
+     * is recorded. Failing to stream, it is downloaded and opened.
+     */
+    val voice: VoicePlayer = VoicePlayer(appContext, scope, { session }, { voiceMessages.state.value is RecordingState.Recording }) { file ->
         received.notice.value = FileNotice("Couldn't play ${file.name.ifBlank { "that" }} here. Downloading it to open in another app.")
         received.open(file)
     }
@@ -114,14 +127,32 @@ class AppContainer(context: Context) {
     /** Shift status of colleagues from the organisation's ERP, and the pairing with it (see [ShiftStatusService]). */
     val shift = ShiftStatusService(appContext, scope) { bringToFront() }
 
+    /** Conversation folders of the signed-in account, and their opt-in sync with the user's own Files (see [FolderController]). */
+    val folders = FolderController(appContext, scope, appearance)
+
+    /** The user's own status: read after sign-in and on coming to the front, set in Settings (see [OwnStatusController]). */
+    val ownStatus = OwnStatusController(scope)
+
     /** The one call this phone can be in (see [CallController]). */
     val calls = CallController(appContext, this)
 
     /** Incoming calls ringing (see [CallRinger]). */
     val ringer = CallRinger(appContext, this)
 
+    /** Recording a voice message from the composer, one at a time (see [VoiceMessages]). */
+    val voiceMessages: VoiceMessages = VoiceMessages(appContext, scope, uploads, voice, { calls.busy }) { session }
+
     /** The push stage replaces this with the real implementation (in [TalqApp.onCreate]). */
     var pushRegistrar: PushRegistrar = NoOpPushRegistrar()
+
+    /** The phone's network, watched for the whole process: the connection line, and what goes again when it is back (see [NetworkWatch]). */
+    val network = NetworkWatch(appContext, scope)
+
+    /**
+     * The account (server and user) that dismissed the conversation list's "notifications are off"
+     * line: hidden for it until the process ends. One value for both places the list is drawn.
+     */
+    val notifyNoticeDismissed = MutableStateFlow<String?>(null)
 
     private val _sessionState = MutableStateFlow<SessionState>(SessionState.Loading)
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
@@ -141,6 +172,25 @@ class AppContainer(context: Context) {
         scope.launch { gate.run(sessionState) }
         scope.launch { badge.run(sessionState) }
         scope.launch { shift.run(sessionState) }
+        scope.launch { folders.run(sessionState) }
+        scope.launch { ownStatus.run(sessionState) }
+        scope.launch { drafts.run(sessionState) }
+        network.start(::onNetworkUsable)
+    }
+
+    /**
+     * The network is usable again (after none, or one Android could not validate): a start that
+     * could not reach the server tries again, the session's feeds, first loads and list timer stop
+     * waiting, files that failed for want of a connection go again (chunk resume and the
+     * referenceId check keep that safe), and a push registration that failed the same way is
+     * tried again. Texts are not sent again here (their retry does not check the server first).
+     */
+    private fun onNetworkUsable() {
+        restoreIfUnreachable()
+        val session = session ?: return
+        session.networkBack()
+        uploads.retryNetworkFailures()
+        if ((pushRegistrar.status.value as? PushStatus.Error)?.network == true) pushRegistrar.retry()
     }
 
     /** Bring MainActivity back on top of whatever the app opened over itself (the sign-in tab). */
@@ -228,8 +278,16 @@ class AppContainer(context: Context) {
 
     /** Sign out: drop push, revoke the app password, clear storage. Always ends signed out. */
     suspend fun logout() = mutex.withLock {
+        // A voice message being recorded is the account's: thrown away at once (the microphone
+        // closes) and never sent, before its folder is cleared below.
+        voiceMessages.signedOut()
         val session = session
         if (session != null) {
+            // First, folder sync stops (and is waited for): nothing of it starts while the call
+            // below is left (which can take seconds), nothing goes out on a dead password, nothing
+            // is uploaded at sign-out. It sends nothing itself. The folder files stay on the device.
+            folders.signedOut()
+            ownStatus.signedOut()
             // Leave a running call while the account still works (after the revoke, leaving answers 401).
             ringer.signedOut()
             calls.signedOut()
@@ -249,6 +307,8 @@ class AppContainer(context: Context) {
         shift.signedOut()
         notifyLevels.clear()
         roomTabs.clearAll()
+        // Unsent text is the account's: never shown to whoever signs in next (as on desktop).
+        drafts.clear()
         pendingDeepLink.value = null
         _sessionState.value = SessionState.SignedOut
     }
@@ -271,6 +331,9 @@ class AppContainer(context: Context) {
         scope.launch {
             mutex.withLock {
                 val session = session ?: return@withLock
+                // First, before the session closes: the folder sync stops and sends nothing more.
+                folders.signedOut()
+                ownStatus.signedOut()
                 ringer.signedOut()
                 calls.abort()
                 // Push belongs to the account that just went away: drop the subscription on
@@ -280,6 +343,7 @@ class AppContainer(context: Context) {
                 } catch (_: Exception) {
                 }
                 pendingDeepLink.value = null
+                voiceMessages.signedOut()
                 uploads.clearAll()
                 voice.stop()
                 received.clearAll()
@@ -288,6 +352,7 @@ class AppContainer(context: Context) {
                 shift.signedOut()
                 notifyLevels.clear()
                 roomTabs.clearAll()
+                drafts.clear()
                 session.close()
                 _sessionState.value = SessionState.SignedOut
             }
@@ -358,6 +423,11 @@ class TalqApp : Application(), SingletonImageLoader.Factory {
                 when (event) {
                     Lifecycle.Event.ON_START -> {
                         container.shift.setForeground(true)
+                        // Folder sync pulls on coming to the front (at most every 2 min) and polls
+                        // only while in front.
+                        container.folders.setForeground(true)
+                        // The own status may have been changed on another device meanwhile.
+                        container.ownStatus.refresh()
                         // The update check is throttled inside (every two hours); asking now and
                         // then also covers an app that stays open all day on a desk.
                         if (container.updates.enabled) {
@@ -372,6 +442,8 @@ class TalqApp : Application(), SingletonImageLoader.Factory {
                     }
                     Lifecycle.Event.ON_STOP -> {
                         container.shift.setForeground(false)
+                        // ... and pushes a pending change on leaving it.
+                        container.folders.setForeground(false)
                         updateTicks?.cancel()
                         updateTicks = null
                     }

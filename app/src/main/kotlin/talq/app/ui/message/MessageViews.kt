@@ -2,7 +2,8 @@ package talq.app.ui.message
 
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
-import android.text.format.DateFormat
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
@@ -74,16 +75,22 @@ import coil3.compose.AsyncImage
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 import kotlin.math.roundToInt
 import talq.app.theme.AvatarFills
 import talq.app.theme.TalqTheme
 import talq.app.ui.adaptive.LocalTwoPane
+import talq.app.ui.chat.SelectMark
 import talq.app.ui.common.Avatar
+import talq.app.ui.common.UiLocale
 import talq.app.ui.common.authorizedImage
+import talq.app.ui.common.clockPattern
+import talq.app.ui.common.onSecondaryClick
+import talq.app.ui.common.BUBBLE_PREVIEW_PX
+import talq.app.ui.common.thumbnailKey
 import talq.app.ui.common.userMessage
 import talq.core.model.ChatMessage
 import talq.core.model.RichObject
+import talq.core.model.isSelectableMessage
 import talq.core.repo.OutboxMessage
 import talq.core.repo.OutboxStatus
 import talq.core.repo.TalkSession
@@ -102,7 +109,7 @@ internal fun bubbleMaxWidth(): Dp = if (LocalTwoPane.current) 480.dp else 310.dp
 
 fun clockTime(context: android.content.Context, timestamp: Long): String =
     Instant.ofEpochSecond(timestamp).atZone(ZoneId.systemDefault()).format(
-        DateTimeFormatter.ofPattern(if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a", Locale.getDefault()),
+        DateTimeFormatter.ofPattern(clockPattern(context), UiLocale),
     )
 
 @Composable
@@ -169,93 +176,123 @@ fun MessageRow(
     onOpenImage: (RichObject) -> Unit,
     onOpenFile: (RichObject) -> Unit,
     onReaction: (String) -> Unit,
+    /** Messages are being picked: a tap (or touch and hold) anywhere on the row picks this one. */
+    selecting: Boolean = false,
+    selected: Boolean = false,
+    onToggleSelect: () -> Unit = {},
 ) {
     val colors = TalqTheme.colors
     val m = item.message
     val mine = item.mine
-    SwipeToReply(enabled = canReply && !m.deleted, onReply = onReply) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(if (highlighted) colors.accentSoft.copy(alpha = 0.5f) else Color.Transparent)
-                .padding(
-                    start = 10.dp, end = 10.dp,
-                    top = if (item.startsGroup) 6.dp else 1.5.dp,
-                    bottom = if (item.endsGroup) 2.dp else 0.dp,
-                ),
-            horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
-        ) {
-            if (!mine) {
-                if (item.startsGroup) {
-                    Avatar(
-                        url = session.client.actorAvatarUrl(m.actorType, m.actorId),
-                        authorization = session.client.authorizationHeader,
-                        name = m.actorDisplayName,
-                        size = AvatarSize,
-                        modifier = Modifier.padding(top = if (showSender) 18.dp else 0.dp),
-                    )
-                } else {
-                    Spacer(Modifier.width(AvatarSize))
-                }
-                Spacer(Modifier.width(8.dp))
-            } else {
-                Spacer(Modifier.width(40.dp))
-            }
-            Column(
-                modifier = Modifier.weight(1f, fill = false).widthIn(max = bubbleMaxWidth()),
-                horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
+    val selectable = isSelectableMessage(m)
+    SwipeToReply(enabled = canReply && !m.deleted && !selecting, onReply = onReply) {
+        // A right-click anywhere on the row opens the same menu as touch and hold.
+        Box(Modifier.onSecondaryClick(if (selecting) null else onLongPress)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(if (highlighted || (selecting && selected)) colors.accentSoft.copy(alpha = 0.5f) else Color.Transparent),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (!mine && showSender && item.startsGroup) {
-                    Text(
-                        text = m.actorDisplayName.ifBlank { "Guest" },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.authorInk(m.actorType + m.actorId),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
-                    )
-                }
-                val shape = RoundedCornerShape(
-                    topStart = if (!mine && !item.startsGroup) 6.dp else 14.dp,
-                    topEnd = if (mine && !item.startsGroup) 6.dp else 14.dp,
-                    bottomStart = if (!mine && !item.endsGroup) 6.dp else 14.dp,
-                    bottomEnd = if (mine && !item.endsGroup) 6.dp else 14.dp,
-                )
-                Column(
+                if (selecting) SelectMark(selectable = selectable, selected = selected)
+                Row(
                     modifier = Modifier
-                        .clip(shape)
-                        .background(if (mine) colors.bgMessageOwn else colors.bgSurface)
-                        .combinedClickable(onClick = {}, onLongClick = onLongPress)
-                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                        .weight(1f)
+                        .padding(
+                            start = 10.dp, end = 10.dp,
+                            top = if (item.startsGroup) 6.dp else 1.5.dp,
+                            bottom = if (item.endsGroup) 2.dp else 0.dp,
+                        ),
+                    horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
                 ) {
-                    if (topicChip != null) TopicChipRow(topicChip, onOpenTopic)
-                    BubbleBody(m, session, onQuoteClick, onOpenImage, onOpenFile, onLongPress)
-                    Row(
-                        modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    if (!mine) {
+                        if (item.startsGroup) {
+                            Avatar(
+                                url = session.client.actorAvatarUrl(m.actorType, m.actorId),
+                                authorization = session.client.authorizationHeader,
+                                name = m.actorDisplayName,
+                                size = AvatarSize,
+                                modifier = Modifier.padding(top = if (showSender) 18.dp else 0.dp),
+                            )
+                        } else {
+                            Spacer(Modifier.width(AvatarSize))
+                        }
+                        Spacer(Modifier.width(8.dp))
+                    } else {
+                        Spacer(Modifier.width(40.dp))
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f, fill = false).widthIn(max = bubbleMaxWidth()),
+                        horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
                     ) {
-                        Text(
-                            text = clockTime(LocalContext.current, m.timestamp) + if (m.lastEditTimestamp > 0) " · edited" else "",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontSize = 11.sp,
-                            color = colors.textMuted,
-                        )
-                        if (readMark != null) {
-                            val read = readMark == ReadMark.Read
+                        if (!mine && showSender && item.startsGroup) {
                             Text(
-                                text = if (read) "\u25C9" else "\u25CB",
-                                fontSize = 12.sp,
-                                color = if (read) colors.accentText else colors.textMuted,
-                                modifier = Modifier
-                                    .padding(start = 4.dp)
-                                    .semantics { contentDescription = if (read) "Read" else "Delivered" },
+                                text = m.actorDisplayName.ifBlank { "Guest" },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = colors.authorInk(m.actorType + m.actorId),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
                             )
                         }
+                        val shape = RoundedCornerShape(
+                            topStart = if (!mine && !item.startsGroup) 6.dp else 14.dp,
+                            topEnd = if (mine && !item.startsGroup) 6.dp else 14.dp,
+                            bottomStart = if (!mine && !item.endsGroup) 6.dp else 14.dp,
+                            bottomEnd = if (mine && !item.endsGroup) 6.dp else 14.dp,
+                        )
+                        Column(
+                            modifier = Modifier
+                                .clip(shape)
+                                .background(if (mine) colors.bgMessageOwn else colors.bgSurface)
+                                .combinedClickable(onClick = {}, onLongClick = onLongPress)
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                        ) {
+                            if (topicChip != null) TopicChipRow(topicChip, onOpenTopic)
+                            BubbleBody(m, session, onQuoteClick, onOpenImage, onOpenFile, onLongPress)
+                            Row(
+                                modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = clockTime(LocalContext.current, m.timestamp) + if (m.lastEditTimestamp > 0) " · edited" else "",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 11.sp,
+                                    color = colors.textMuted,
+                                )
+                                if (readMark != null) {
+                                    val read = readMark == ReadMark.Read
+                                    Text(
+                                        text = if (read) "\u25C9" else "\u25CB",
+                                        fontSize = 12.sp,
+                                        color = if (read) colors.accentText else colors.textMuted,
+                                        modifier = Modifier
+                                            .padding(start = 4.dp)
+                                            .semantics { contentDescription = if (read) "Read" else "Delivered" },
+                                    )
+                                }
+                            }
+                        }
+                        if (m.reactions.isNotEmpty()) ReactionChips(m, onReaction)
                     }
+                    if (!mine) Spacer(Modifier.width(24.dp))
                 }
-                if (m.reactions.isNotEmpty()) ReactionChips(m, onReaction)
             }
-            if (!mine) Spacer(Modifier.width(24.dp))
+            // While picking, the whole row is one target: nothing inside it (a picture, a link, a
+            // reaction) takes the tap.
+            if (selecting) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .combinedClickable(
+                            enabled = selectable,
+                            role = Role.Checkbox,
+                            onClick = onToggleSelect,
+                            onLongClick = onToggleSelect,
+                        )
+                        .semantics { stateDescription = if (selected) "Selected" else "Not selected" },
+                )
+            }
         }
     }
 }
@@ -399,8 +436,9 @@ fun previewText(m: ChatMessage): String = when {
 @Composable
 private fun ImageAttachment(file: RichObject, session: TalkSession, onClick: () -> Unit, onLongPress: () -> Unit) {
     val context = LocalContext.current
-    val url = session.client.filePreviewUrl(file.id, 720, 720)
-    val request = remember(url) { authorizedImage(context, url, session.client.authorizationHeader) }
+    val url = session.client.filePreviewUrl(file.id, BUBBLE_PREVIEW_PX, BUBBLE_PREVIEW_PX)
+    // An exact key: the viewer shows this copy at once while the sharp one loads.
+    val request = remember(url) { authorizedImage(context, url, session.client.authorizationHeader, memoryKey = thumbnailKey(url)) }
     val ratio = if (file.width > 0 && file.height > 0) (file.width.toFloat() / file.height).coerceIn(0.6f, 2.2f) else 4f / 3f
     Box(contentAlignment = Alignment.Center) {
         AsyncImage(
@@ -456,7 +494,7 @@ private fun ReactionChips(m: ChatMessage, onReaction: (String) -> Unit) {
 
 /** A message on its way out, or one that did not make it: never dropped, always retryable. */
 @Composable
-fun PendingRow(outbox: OutboxMessage, onRetry: () -> Unit, onDiscard: () -> Unit) {
+fun PendingRow(outbox: OutboxMessage, onRetry: () -> Unit, onDiscard: () -> Unit, text: String = outbox.text) {
     val colors = TalqTheme.colors
     val failed = outbox.status == OutboxStatus.FAILED
     Column(
@@ -473,7 +511,7 @@ fun PendingRow(outbox: OutboxMessage, onRetry: () -> Unit, onDiscard: () -> Unit
                 .padding(horizontal = 10.dp, vertical = 7.dp),
         ) {
             outbox.replyTo?.let { QuoteBlock(it, onClick = {}, onLongPress = {}) }
-            Text(outbox.text, style = MaterialTheme.typography.bodyLarge, color = colors.textPrimary)
+            Text(text, style = MaterialTheme.typography.bodyLarge, color = colors.textPrimary)
             if (!failed) {
                 Text(
                     "Sending…",

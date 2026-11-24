@@ -11,6 +11,17 @@ import java.util.Locale
 import talq.core.TalkError
 
 /**
+ * The language of day and month names (and AM/PM) everywhere in the app: the app's texts are
+ * English, so the dates are too, whatever the phone's language ("Mon", not the phone's word for
+ * it, next to English words). Only the 12/24-hour choice follows the phone ([clockPattern]).
+ * Never `Locale.setDefault`: the folder order and case folding read the phone's locale.
+ */
+val UiLocale: Locale = Locale.ENGLISH
+
+/** "HH:mm" or "h:mm a", as the phone's clock setting says. */
+fun clockPattern(context: Context): String = if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a"
+
+/**
  * Compact "when" for list rows: now, 12m, 14:05, Tue, 3 Nov, 3 Nov 2025.
  * [timestamp] and [nowMillis] are UTC; the output is in the phone's zone and clock style.
  */
@@ -21,13 +32,11 @@ fun relativeTime(context: Context, timestamp: Long, nowMillis: Long = System.cur
     val now = Instant.ofEpochMilli(nowMillis).atZone(zone)
     val seconds = ChronoUnit.SECONDS.between(then, now)
     val days = ChronoUnit.DAYS.between(then.toLocalDate(), now.toLocalDate())
-    val locale = Locale.getDefault()
+    val locale = UiLocale
     return when {
         seconds < 60 -> "now"
         seconds < 3600 -> "${seconds / 60}m"
-        days == 0L -> then.format(
-            DateTimeFormatter.ofPattern(if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a", locale),
-        )
+        days == 0L -> then.format(DateTimeFormatter.ofPattern(clockPattern(context), locale))
         days in 1..6 -> then.dayOfWeek.getDisplayName(TextStyle.SHORT, locale)
         then.year == now.year -> then.format(DateTimeFormatter.ofPattern("d MMM", locale))
         else -> then.format(DateTimeFormatter.ofPattern("d MMM yyyy", locale))

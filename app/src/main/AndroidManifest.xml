@@ -43,6 +43,8 @@
     <queries>
         <package android:name="com.hihonor.android.launcher" />
         <package android:name="com.huawei.android.launcher" />
+        <!-- Settings > Diagnostics: whether Google Play services is Google's own. -->
+        <package android:name="com.google.android.gms" />
         <intent>
             <action android:name="android.support.customtabs.action.CustomTabsService" />
         </intent>

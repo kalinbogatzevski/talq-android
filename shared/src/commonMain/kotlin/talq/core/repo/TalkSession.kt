@@ -6,7 +6,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import talq.core.TalkClient
 import talq.core.TalkError
 import talq.core.TalkFiles
+import talq.core.folders.FolderDav
 import talq.core.model.ChatMessage
 import talq.core.model.CredentialStore
 import talq.core.model.Credentials
@@ -48,10 +48,19 @@ class TalkSession private constructor(
 ) {
     internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** Ends the waits of failed polls and loads when the network is usable again ([networkBack]). */
+    internal val waker = Waker()
+
     val rooms = RoomsRepository(this)
 
     /** Uploads, downloads and shared items of this account. */
     val files = TalkFiles(client, user.userId, capabilities.attachments)
+
+    /**
+     * The folder sync's WebDAV client (the user's own /.talq-folders.json). Made on first use: an
+     * account that never turns folder sync on never builds it.
+     */
+    val folderDav: FolderDav by lazy { FolderDav(client, user.userId) }
 
     private val fileOutboxes = MutableStateFlow<Map<String, FileOutbox>>(emptyMap())
 
@@ -63,6 +72,11 @@ class TalkSession private constructor(
     /** Hand messages fetched outside the live feed to every open view of the room. */
     internal fun absorb(token: String, messages: List<ChatMessage>) {
         for ((key, repo) in chats.value) if (key.first == token) repo.absorb(messages)
+    }
+
+    /** A message of the room changed (an edit or delete answer): every view of the room that holds it. */
+    internal fun applyChange(token: String, updated: ChatMessage) {
+        for ((key, repo) in chats.value) if (key.first == token) repo.applyChange(updated)
     }
 
     private val feeds = MutableStateFlow<Map<String, RoomFeed>>(emptyMap())
@@ -124,7 +138,62 @@ class TalkSession private constructor(
     /** The room's unread tracker if something already made one; never creates it. */
     fun unreadIfCreated(token: String): UnreadTracker? = unreadTrackers.value[token]
 
-    private fun feed(token: String): RoomFeed = getOrCreate(feeds, token) { RoomFeed(client, token, scope) }
+    private fun feed(token: String): RoomFeed = getOrCreate(feeds, token) { RoomFeed(client, token, scope, waker) }
+
+    /**
+     * The phone's network is usable again (the app's network watch). Every room feed that waits
+     * after a failure polls now (a poll on its way is asked again), a first load that failed tries
+     * again, and the conversation list's reload timer, while it runs, reloads now. Anything that
+     * works carries on as it was.
+     */
+    fun networkBack() = waker.wake()
+
+    /** Rooms being brought up to date by [prefetchChat]: token -> a push came meanwhile (go once more). */
+    private val prefetching = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
+    /**
+     * A message for [token] is on its way to the user (a chat push): load the room's newest page
+     * now, so a tap on the notification opens on it from memory instead of a spinner. Its tabs
+     * loaded earlier that miss something of that page are brought up to date too (a tab not made
+     * yet takes the whole chat's messages when it is made). A room on screen is live already and
+     * is left alone. One run per room at a time; a push during it asks for one more after it.
+     *
+     * Every load goes through [ChatRepository.refresh], which pins the room's poll cursor before
+     * its page (the no-gap rule in [RoomFeed]); opening the room pins it afresh.
+     */
+    fun prefetchChat(token: String) {
+        if (token.isEmpty()) return
+        var first = false
+        prefetching.update { m ->
+            first = token !in m
+            m + (token to !first)
+        }
+        if (!first) return
+        scope.launch {
+            var done = false
+            try {
+                while (!done) {
+                    bringUpToDate(token)
+                    prefetching.update { m ->
+                        done = m[token] != true
+                        if (done) m - token else m + (token to false)
+                    }
+                }
+            } finally {
+                if (!done) prefetching.update { it - token }
+            }
+        }
+    }
+
+    private suspend fun bringUpToDate(token: String) {
+        val whole = chat(token)
+        if (whole.isLive || !whole.refresh()) return
+        val fresh = whole.state.value.messages
+        for ((key, repo) in chats.value) {
+            if (key.first != token || key.second == ChatScope.All) continue
+            if (!repo.isLive && repo.isBehind(fresh)) repo.refresh()
+        }
+    }
 
     private inline fun <K, V> getOrCreate(map: MutableStateFlow<Map<K, V>>, key: K, create: () -> V): V {
         while (true) {
@@ -203,8 +272,8 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
     private var shownFrom = -1L
     /** [clock] when the reload whose error is in [state] was sent. */
     private var errorFrom = -1L
-    /** Read echoes not yet known to be in a reload's answer: token to (marker, clock). */
-    private val echoes = MutableStateFlow<Map<String, Pair<Long, Long>>>(emptyMap())
+    /** Read echoes not yet known to be in a reload's answer, by token. */
+    private val echoes = MutableStateFlow<Map<String, ReadEcho>>(emptyMap())
 
     /** All conversations, most recent activity first. */
     val rooms: StateFlow<List<Room>> = _rooms.asStateFlow()
@@ -229,10 +298,10 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
                 }
                 shownFrom = sentAt
                 // Echoes from before this reload was sent are in its answer; later ones are not.
-                echoes.update { all -> all.filterValues { it.second > sentAt } }
+                echoes.update { all -> all.filterValues { it.at > sentAt } }
                 _rooms.update {
                     val newer = echoes.value
-                    list.map { room -> newer[room.token]?.let { room.withRead(it.first) } ?: room }
+                    list.map { room -> newer[room.token]?.let { room.withRead(it.marker, it.left) } ?: room }
                 }
                 // An error from a reload sent after this one is newer than this success: kept.
                 _state.update { if (sentAt > errorFrom) LoadState(loaded = true) else it.copy(loaded = true, loading = false) }
@@ -259,8 +328,10 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
         if (autoJob?.isActive == true) return
         autoJob = session.scope.launch {
             while (isActive) {
+                val wakes = session.waker.mark()
                 refresh()
-                delay(intervalMillis)
+                // At once when the network is usable again (also while the reload was on its way).
+                session.waker.pause(intervalMillis, since = wakes)
             }
         }
     }
@@ -290,24 +361,46 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
         autoJob = null
     }
 
-    /** Local echo of a successful "mark read", so the badge clears without a round trip. */
-    internal fun applyRead(token: String, lastReadMessage: Long) {
+    /**
+     * Local echo of a successful "mark read", so the badge drops without a round trip. [left]: the
+     * server's own unread numbers right after the move (its answer), for a room read only partly.
+     */
+    internal fun applyRead(token: String, lastReadMessage: Long, left: ReadLeft? = null) {
         val at = clock.updateAndGet { it + 1 }
         echoes.update { all ->
-            val earlier = all[token]?.first ?: 0L
-            all + (token to (maxOf(earlier, lastReadMessage) to at))
+            val earlier = all[token]
+            val echo = when {
+                earlier == null || lastReadMessage > earlier.marker -> ReadEcho(lastReadMessage, at, left)
+                lastReadMessage == earlier.marker -> ReadEcho(lastReadMessage, at, left ?: earlier.left)
+                else -> earlier.copy(at = at)
+            }
+            all + (token to echo)
         }
-        _rooms.update { list -> list.map { if (it.token == token) it.withRead(lastReadMessage) else it } }
+        _rooms.update { list -> list.map { if (it.token == token) it.withRead(lastReadMessage, left) else it } }
     }
 
-    private fun Room.withRead(marker: Long): Room {
+    /**
+     * Caught up: nothing unread. Partly read: the server's numbers from [left] where it gave them,
+     * never more than shown (only ever lower; the next reload has the truth). Else only the marker.
+     */
+    private fun Room.withRead(marker: Long, left: ReadLeft? = null): Room {
         if (lastReadMessage >= marker) return this
         val caughtUp = marker >= (lastMessage?.id ?: 0L)
-        return copy(
-            lastReadMessage = marker,
-            unreadMessages = if (caughtUp) 0 else unreadMessages,
-            unreadMention = if (caughtUp) false else unreadMention,
-            unreadMentionDirect = if (caughtUp) false else unreadMentionDirect,
-        )
+        return when {
+            caughtUp -> copy(lastReadMessage = marker, unreadMessages = 0, unreadMention = false, unreadMentionDirect = false)
+            left != null -> copy(
+                lastReadMessage = marker,
+                unreadMessages = minOf(unreadMessages, maxOf(0, left.unread)),
+                unreadMention = unreadMention && left.mention,
+                unreadMentionDirect = unreadMentionDirect && left.direct,
+            )
+            else -> copy(lastReadMessage = marker)
+        }
     }
 }
+
+/** What is still unread in a room right after its read marker moved, as the server answered the move. */
+internal data class ReadLeft(val unread: Int, val mention: Boolean, val direct: Boolean)
+
+/** A "mark read" echo: the marker, [RoomsRepository]'s clock when it was made, and the numbers after it. */
+private data class ReadEcho(val marker: Long, val at: Long, val left: ReadLeft?)

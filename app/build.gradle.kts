@@ -108,8 +108,8 @@ android {
         applicationId = "io.github.kalinbogatzevski.talq"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.6.3"
+        versionCode = 28
+        versionName = "0.9.1"
         // Calls bring libwebrtc's native library (12 MB for arm64, 7 MB for 32-bit ARM, more
         // for x86). Phones and tablets are ARM; x86 builds would only serve emulators and a few
         // Chromebooks, at three times the size.

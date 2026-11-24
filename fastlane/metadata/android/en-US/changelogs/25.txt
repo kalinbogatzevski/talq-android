@@ -1,0 +1,4 @@
+0.8.0: Set your own status from the phone: Online, Away, Do not disturb or Invisible, with a message and when to clear it. Settings > Status.
+Touch and hold Send to send silently or later. Scheduled messages are in a conversation's menu.
+Touch and hold a message, then Select, to copy or forward several messages at once.
+Voice messages: touch and hold the microphone to record, let go to send.

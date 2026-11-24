@@ -5,6 +5,7 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Notifications
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.automirrored.outlined.ListAlt
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.PermMedia
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -45,6 +47,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,6 +57,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -61,9 +67,17 @@ import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import talq.app.appContainer
 import talq.app.call.CallActivity
+import talq.app.files.RecordingState
 import talq.app.nav.RoomRoute
 import talq.app.theme.TalqTheme
 import talq.app.ui.chat.ChatPane
+import talq.app.ui.chat.ForwardSheet
+import talq.app.ui.chat.KeepScreenOn
+import talq.app.ui.chat.MentionSuggester
+import talq.app.ui.chat.ScheduledMessagesSheet
+import talq.app.ui.chat.SelectionTopBar
+import talq.app.ui.chat.copyStamp
+import talq.app.ui.chat.copyToClipboard
 import talq.app.ui.common.Avatar
 import talq.app.ui.common.StatusAvatar
 import talq.app.ui.common.StatusLine
@@ -75,6 +89,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import talq.core.TalkError
 import talq.core.model.NotificationLevel
+import talq.core.model.VoicePlace
+import talq.core.model.copiedMessages
 import talq.core.repo.OutboxStatus
 import talq.core.repo.TalkSession
 import talq.core.shift.ShiftState
@@ -116,9 +132,10 @@ fun RoomHostScreen(
     onTabRequestDone: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val appContext = context.applicationContext
     val token = route.token
     val vm: RoomHostViewModel = viewModel(key = "room-$token") {
-        RoomHostViewModel(session, route, context.appContainer.roomTabs, createSavedStateHandle())
+        RoomHostViewModel(session, route, appContext.appContainer.roomTabs, appContext, createSavedStateHandle())
     }
     val colors = TalqTheme.colors
     LaunchedEffect(tabRequest) {
@@ -208,6 +225,28 @@ fun RoomHostScreen(
     // A room without topics is the whole chat with no strip, whatever tab was asked for.
     val shown: RoomTab? = if (hasTopics) wanted else RoomTab.All
 
+    // A voice message being recorded belongs to the room where it started (VoiceMessages): this
+    // room opening ends one that started in another room, and this room's screen going away (not
+    // a turn of the phone) or the app leaving the front ends one that started here; each is sent
+    // where it started. While it records the screen stays on.
+    val voiceMessages = context.appContainer.voiceMessages
+    val recordingState by voiceMessages.state.collectAsStateWithLifecycle()
+    val recordingHere = (recordingState as? RecordingState.Recording)?.place?.token == token
+    LaunchedEffect(voiceMessages, token) { voiceMessages.roomShown(token) }
+    DisposableEffect(voiceMessages, token) {
+        onDispose { if (activity?.isChangingConfigurations != true) voiceMessages.roomLeft(token) }
+    }
+    val onScreen by rememberUpdatedState(VoicePlace(token, (shown as? RoomTab.Topic)?.id ?: 0L))
+    DisposableEffect(voiceMessages, activity) {
+        val lifecycle = (activity as? LifecycleOwner)?.lifecycle
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && activity?.isChangingConfigurations != true) voiceMessages.appLeft(onScreen)
+        }
+        lifecycle?.addObserver(observer)
+        onDispose { lifecycle?.removeObserver(observer) }
+    }
+    if (recordingHere) KeepScreenOn()
+
     // The strip's tab is the one this room opens on next time. Only the host records it.
     LaunchedEffect(hasTopics, shown, topicsLoad.loaded) {
         if (hasTopics && shown != null) vm.remember(shown)
@@ -244,6 +283,8 @@ fun RoomHostScreen(
 
     val roomName = room?.displayName ?: ""
     val draft = vm.draft
+    // Starting a topic hides the tab's composer: a recording here ends and goes where it started.
+    LaunchedEffect(draft != null) { if (draft != null) voiceMessages.roomLeft(token) }
     val draftSending = draft?.referenceId?.let { ref ->
         whole.outbox.any { it.referenceId == ref && it.status == OutboxStatus.SENDING }
     } == true
@@ -266,6 +307,8 @@ fun RoomHostScreen(
     }
 
     val scope = rememberCoroutineScope()
+    // "@" suggestions in a draft topic's box (a tab's own box has its view model's).
+    val draftMentions = remember(session, token) { MentionSuggester(session, token, scope, context.appContainer.drafts) }
     val holder = rememberSaveableStateHolder()
     var menuOpen by remember { mutableStateOf(false) }
     var newTopic by remember { mutableStateOf(false) }
@@ -274,148 +317,190 @@ fun RoomHostScreen(
     var renameFor by remember { mutableStateOf<Long?>(null) }
     var renameError by remember { mutableStateOf<String?>(null) }
     var renameBusy by remember { mutableStateOf(false) }
+    var scheduledOpen by remember { mutableStateOf(false) }
+    var forwardOpen by remember { mutableStateOf(false) }
+    // The picker was opened by touch and hold's Forward on one message: closing it without a
+    // pick drops that one-message selection again, as if nothing had been selected.
+    var forwardFromMenu by remember { mutableStateOf(false) }
+    val selection = vm.selection
+
+    // Back ends the selection first (not while a forward runs with it).
+    BackHandler(enabled = selection.active && !vm.forwarding) { selection.clear() }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            // Name + status line + tab name are three lines of text: on a large font setting
-            // they are taller than the standard bar, which would cut the last one.
-            val subtitleShown = draft != null || tabName.isNotEmpty()
-            val threeLines = direct != null && hasStatusLine(direct, shift) && subtitleShown
-            val barHeight = if (!threeLines) TopAppBarDefaults.TopAppBarExpandedHeight else {
-                with(LocalDensity.current) { (22 + 16 + 16).sp.toDp() + 8.dp }
-                    .coerceAtLeast(TopAppBarDefaults.TopAppBarExpandedHeight)
-            }
-            TopAppBar(
-                expandedHeight = barHeight,
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (direct != null) {
-                            StatusAvatar(
-                                url = session.client.roomAvatarUrl(token, direct.avatarVersion, !TalqTheme.colors.isLight),
-                                authorization = session.client.authorizationHeader,
-                                name = roomName,
-                                ring = MaterialTheme.colorScheme.surface,
-                                size = 36.dp,
-                                presence = direct.status,
-                                shift = shift?.state ?: ShiftState.Unknown,
-                            )
-                        } else {
-                            Avatar(
-                                url = session.client.roomAvatarUrl(token, room?.avatarVersion ?: "", !TalqTheme.colors.isLight),
-                                authorization = session.client.authorizationHeader,
-                                name = roomName,
-                                size = 36.dp,
-                            )
+            if (selection.active) {
+                SelectionTopBar(
+                    count = selection.count,
+                    forwarding = vm.forwarding,
+                    onCopy = {
+                        if (!selection.locked) {
+                            val text = copiedMessages(selection.messages(), ::copyStamp)
+                            if (text.isNotEmpty()) copyToClipboard(context, text, label = "Messages")
+                            selection.clear()
+                            vm.notice = "Copied"
                         }
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(roomName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            // One-to-one: line 2 is the person (shift, presence); a tab name,
-                            // when there is one, moves to line 3 so the shift is never lost.
-                            if (direct != null && hasStatusLine(direct, shift)) StatusLine(direct, shift)
-                            val subtitle = if (draft != null) "New topic: ${draft.title}" else tabName
-                            if (subtitle.isNotEmpty()) {
-                                Text(
-                                    subtitle,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.textSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+                    },
+                    onForward = {
+                        if (!vm.forwarding) {
+                            forwardFromMenu = false
+                            forwardOpen = true
+                        }
+                    },
+                    onCancel = { selection.clear() },
+                )
+            } else {
+                // Name + status line + tab name are three lines of text: on a large font setting
+                // they are taller than the standard bar, which would cut the last one.
+                val subtitleShown = draft != null || tabName.isNotEmpty()
+                val threeLines = direct != null && hasStatusLine(direct, shift) && subtitleShown
+                val barHeight = if (!threeLines) TopAppBarDefaults.TopAppBarExpandedHeight else {
+                    with(LocalDensity.current) { (22 + 16 + 16).sp.toDp() + 8.dp }
+                        .coerceAtLeast(TopAppBarDefaults.TopAppBarExpandedHeight)
+                }
+                TopAppBar(
+                    expandedHeight = barHeight,
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (direct != null) {
+                                StatusAvatar(
+                                    url = session.client.roomAvatarUrl(token, direct.avatarVersion, !TalqTheme.colors.isLight),
+                                    authorization = session.client.authorizationHeader,
+                                    name = roomName,
+                                    ring = MaterialTheme.colorScheme.surface,
+                                    size = 36.dp,
+                                    presence = direct.status,
+                                    shift = shift?.state ?: ShiftState.Unknown,
+                                )
+                            } else {
+                                Avatar(
+                                    url = session.client.roomAvatarUrl(token, room?.avatarVersion ?: "", !TalqTheme.colors.isLight),
+                                    authorization = session.client.authorizationHeader,
+                                    name = roomName,
+                                    size = 36.dp,
                                 )
                             }
-                        }
-                    }
-                },
-                navigationIcon = {
-                    if (showBack) {
-                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-                    }
-                },
-                actions = {
-                    if (canCall) {
-                        // During a call these return to it instead of placing another one.
-                        fun call(video: Boolean) = context.startActivity(
-                            if (calls.busy) CallActivity.showIntent(context) else CallActivity.outgoingIntent(context, token, video),
-                        )
-                        IconButton(onClick = { call(video = false) }) {
-                            Icon(Icons.Outlined.Call, contentDescription = "Call")
-                        }
-                        IconButton(onClick = { call(video = true) }) {
-                            Icon(Icons.Outlined.Videocam, contentDescription = "Video call")
-                        }
-                    }
-                    // One tap mutes the open topic (Never) or unmutes it (the usual setting);
-                    // the long-press menu keeps the finer levels.
-                    if (openTopic != null) {
-                        val level = openTopic.attendee.notificationLevel
-                        val muted = level == NotificationLevel.NEVER
-                        IconButton(onClick = {
-                            val id = openTopic.id
-                            vm.setNotificationLevel(id, if (muted) NotificationLevel.DEFAULT else NotificationLevel.NEVER)
-                            noticeScope.launch {
-                                val answer = snackbar.showSnackbar(
-                                    message = if (muted) "Topic unmuted" else "Topic muted: it sends no notifications",
-                                    actionLabel = "Undo",
-                                    duration = SnackbarDuration.Short,
-                                )
-                                if (answer == SnackbarResult.ActionPerformed) vm.setNotificationLevel(id, level)
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(roomName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                // One-to-one: line 2 is the person (shift, presence); a tab name,
+                                // when there is one, moves to line 3 so the shift is never lost.
+                                if (direct != null && hasStatusLine(direct, shift)) StatusLine(direct, shift)
+                                val subtitle = if (draft != null) "New topic: ${draft.title}" else tabName
+                                if (subtitle.isNotEmpty()) {
+                                    Text(
+                                        subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.textSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             }
-                        }) {
-                            Icon(
-                                if (muted) Icons.Outlined.NotificationsOff else Icons.Outlined.Notifications,
-                                contentDescription = if (muted) "Unmute topic" else "Mute topic",
-                                tint = if (muted) colors.textMuted else LocalContentColor.current,
+                        }
+                    },
+                    navigationIcon = {
+                        if (showBack) {
+                            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                        }
+                    },
+                    actions = {
+                        if (canCall) {
+                            // During a call these return to it instead of placing another one.
+                            fun call(video: Boolean) = context.startActivity(
+                                if (calls.busy) CallActivity.showIntent(context) else CallActivity.outgoingIntent(context, token, video),
                             )
+                            IconButton(onClick = { call(video = false) }) {
+                                Icon(Icons.Outlined.Call, contentDescription = "Call")
+                            }
+                            IconButton(onClick = { call(video = true) }) {
+                                Icon(Icons.Outlined.Videocam, contentDescription = "Video call")
+                            }
                         }
-                    }
-                    if (hasTopics) {
-                        IconButton(onClick = { sheetOpen = true }) {
-                            Icon(Icons.AutoMirrored.Outlined.ListAlt, contentDescription = "All topics")
-                        }
-                    }
-                    IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        // One tap mutes the open topic (Never) or unmutes it (the usual setting);
+                        // the long-press menu keeps the finer levels.
                         if (openTopic != null) {
+                            val level = openTopic.attendee.notificationLevel
+                            val muted = level == NotificationLevel.NEVER
+                            IconButton(onClick = {
+                                val id = openTopic.id
+                                vm.setNotificationLevel(id, if (muted) NotificationLevel.DEFAULT else NotificationLevel.NEVER)
+                                noticeScope.launch {
+                                    val answer = snackbar.showSnackbar(
+                                        message = if (muted) "Topic unmuted" else "Topic muted: it sends no notifications",
+                                        actionLabel = "Undo",
+                                        duration = SnackbarDuration.Short,
+                                    )
+                                    if (answer == SnackbarResult.ActionPerformed) vm.setNotificationLevel(id, level)
+                                }
+                            }) {
+                                Icon(
+                                    if (muted) Icons.Outlined.NotificationsOff else Icons.Outlined.Notifications,
+                                    contentDescription = if (muted) "Unmute topic" else "Mute topic",
+                                    tint = if (muted) colors.textMuted else LocalContentColor.current,
+                                )
+                            }
+                        }
+                        if (hasTopics) {
+                            IconButton(onClick = { sheetOpen = true }) {
+                                Icon(Icons.AutoMirrored.Outlined.ListAlt, contentDescription = "All topics")
+                            }
+                        }
+                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            if (openTopic != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Topic notifications") },
+                                    onClick = {
+                                        menuOpen = false
+                                        menuFor = RoomTab.Topic(openTopic.id)
+                                    },
+                                )
+                            }
+                            // With a strip, "+" on it starts a topic; without one, this does.
+                            if (canStartTopic && !hasTopics) {
+                                DropdownMenuItem(
+                                    text = { Text("New topic") },
+                                    leadingIcon = { Icon(Icons.Outlined.Forum, contentDescription = null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        newTopic = true
+                                    },
+                                )
+                            }
+                            // The schedule endpoints answer only where the user may write.
+                            if (session.capabilities.scheduledMessages && !readOnly) {
+                                DropdownMenuItem(
+                                    text = { Text("Scheduled messages") },
+                                    leadingIcon = { Icon(Icons.Outlined.Schedule, contentDescription = null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        scheduledOpen = true
+                                    },
+                                )
+                            }
+                            if (session.capabilities.sharedItems) {
+                                DropdownMenuItem(
+                                    text = { Text("Shared files") },
+                                    leadingIcon = { Icon(Icons.Outlined.PermMedia, contentDescription = null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        onOpenSharedFiles()
+                                    },
+                                )
+                            }
                             DropdownMenuItem(
-                                text = { Text("Topic notifications") },
+                                text = { Text("Refresh") },
                                 onClick = {
                                     menuOpen = false
-                                    menuFor = RoomTab.Topic(openTopic.id)
+                                    vm.refresh(byUser = true, shown = shown?.takeIf { draft == null })
                                 },
                             )
                         }
-                        // With a strip, "+" on it starts a topic; without one, this does.
-                        if (canStartTopic && !hasTopics) {
-                            DropdownMenuItem(
-                                text = { Text("New topic") },
-                                leadingIcon = { Icon(Icons.Outlined.Forum, contentDescription = null) },
-                                onClick = {
-                                    menuOpen = false
-                                    newTopic = true
-                                },
-                            )
-                        }
-                        if (session.capabilities.sharedItems) {
-                            DropdownMenuItem(
-                                text = { Text("Shared files") },
-                                leadingIcon = { Icon(Icons.Outlined.PermMedia, contentDescription = null) },
-                                onClick = {
-                                    menuOpen = false
-                                    onOpenSharedFiles()
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("Refresh") },
-                            onClick = {
-                                menuOpen = false
-                                vm.refresh(byUser = true, shown = shown?.takeIf { draft == null })
-                            },
-                        )
-                    }
-                },
-            )
+                    },
+                )
+            }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
@@ -444,6 +529,7 @@ fun RoomHostScreen(
                         onSend = vm::sendDraft,
                         onRetry = vm::retryDraft,
                         onEditAgain = vm::editDraftAgain,
+                        mentions = draftMentions,
                     )
                 } else if (shown != null) {
                     // One saveable scope per tab: scroll position, "already positioned" and so
@@ -463,6 +549,17 @@ fun RoomHostScreen(
                             // Nor before the room itself (its read marker) is known.
                             readingEnabled = topicsKnown && room != null,
                             snackbar = snackbar,
+                            selection = selection,
+                            // One message: the same forward as the selection bar's, with it picked.
+                            onForward = { m ->
+                                if (!vm.forwarding && !selection.active) {
+                                    selection.start(m)
+                                    if (selection.active) {
+                                        forwardFromMenu = true
+                                        forwardOpen = true
+                                    }
+                                }
+                            },
                             onOpenTopic = { id -> vm.select(RoomTab.Topic(id)) },
                             aboveComposer = { atBottom ->
                                 if (atBottom && hasTopics && nextUnread != null) {
@@ -486,6 +583,32 @@ fun RoomHostScreen(
             },
             onDismiss = { newTopic = false },
         )
+    }
+
+    if (forwardOpen) {
+        if (!selection.active) {
+            LaunchedEffect(Unit) { forwardOpen = false }
+        } else {
+            ForwardSheet(
+                session = session,
+                fromToken = token,
+                count = selection.count,
+                onPick = { room ->
+                    forwardOpen = false
+                    forwardFromMenu = false
+                    vm.forward(room.token)
+                },
+                onDismiss = {
+                    forwardOpen = false
+                    if (forwardFromMenu && !vm.forwarding) selection.clear()
+                    forwardFromMenu = false
+                },
+            )
+        }
+    }
+
+    if (scheduledOpen) {
+        ScheduledMessagesSheet(session = session, token = token, onDismiss = { scheduledOpen = false })
     }
 
     if (sheetOpen) {

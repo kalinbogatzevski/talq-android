@@ -45,7 +45,11 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -65,7 +69,6 @@ import talq.app.data.ThemeChoice
 import talq.app.theme.colorsFor
 import talq.app.appName
 import talq.app.push.PushRegistrar
-import talq.app.ui.message.plainPreview
 import talq.app.ui.update.updateHowTo
 import talq.app.update.UpdateState
 import talq.app.push.PushStatus
@@ -85,6 +88,8 @@ fun SettingsScreen(
     /** Revokes the app password and clears storage. May take a moment. */
     onLogout: () -> Unit,
     onOpenDiagnostics: () -> Unit = {},
+    /** Opened by the list's "Notifications aren't working" Fix: scroll to the Notifications section once. */
+    showNotifications: Boolean = false,
 ) {
     val colors = TalqTheme.colors
     val appName = appName()
@@ -116,7 +121,18 @@ fun SettingsScreen(
             )
         },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())) {
+        val scroll = rememberScrollState()
+        // Where the Notifications section starts in the scrolled column, once it was laid out.
+        var notificationsTop by remember { mutableIntStateOf(-1) }
+        var shownNotifications by rememberSaveable { mutableStateOf(false) }
+        LaunchedEffect(notificationsTop) {
+            if (showNotifications && !shownNotifications && notificationsTop >= 0) {
+                shownNotifications = true
+                scroll.animateScrollTo(notificationsTop)
+            }
+        }
+        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(scroll)) {
+            // Your own status is set from the conversation list's header, not here.
             SectionLabel("Account")
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
@@ -145,7 +161,13 @@ fun SettingsScreen(
             AppearanceSection()
 
             Divider()
-            SectionLabel("Notifications")
+            SectionLabel("Folders")
+            FoldersSection()
+
+            Divider()
+            Box(Modifier.onGloballyPositioned { notificationsTop = it.positionInParent().y.toInt() }) {
+                SectionLabel("Notifications")
+            }
             // Push can be registered and still silent: Android itself may be blocking TalQ.
             val blocked = pushStatus == PushStatus.Active && !notificationsAllowed
             val (headline, detail, tone) =
@@ -193,8 +215,7 @@ fun SettingsScreen(
             }
             if (isHonorOrHuawei()) {
                 Text(
-                    "On this phone, also let $appName start in the background, or notifications stop once it " +
-                        "is swiped away: Settings, Apps, App launch, $appName, Manage manually, all switches on.",
+                    "Also needed here: Settings \u203a Apps \u203a App launch \u203a $appName \u203a Manage manually.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.textMuted,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -247,8 +268,7 @@ fun SettingsScreen(
                     title = "Incoming calls",
                     value = if (fullScreenCalls) "Full screen" else "Notification only",
                     detail = if (fullScreenCalls) null else
-                        "Android is not letting $appName show incoming calls full screen, so a call rings as a " +
-                            "notification only, also on the lock screen. Allow full screen notifications for $appName.",
+                        "Calls ring as a notification only.",
                     valueColor = if (fullScreenCalls) colors.online else colors.danger,
                 )
                 if (!fullScreenCalls) {
@@ -290,10 +310,7 @@ fun SettingsScreen(
                     },
                     detail = when (val s = update) {
                         is UpdateState.Failed -> s.message
-                        is UpdateState.Available -> {
-                            val notes = s.notes.takeIf { it.isNotBlank() }?.let { plainPreview(it, oneLine = false).take(600) + "\n\n" }.orEmpty()
-                            notes + updateHowTo()
-                        }
+                        is UpdateState.Available -> updateHowTo()
                         else -> null
                     },
                     valueColor = when (update) {
@@ -303,7 +320,12 @@ fun SettingsScreen(
                     },
                 )
                 Row(Modifier.padding(horizontal = 8.dp)) {
-                    if (update is UpdateState.Available) TextButton(onClick = { updates.download() }) { Text("Update") }
+                    val downloading by updates.downloading.collectAsStateWithLifecycle()
+                    if (update is UpdateState.Available) {
+                        TextButton(onClick = { updates.download() }, enabled = !downloading) {
+                            Text(if (downloading) "Downloading\u2026" else "Update")
+                        }
+                    }
                     if (update !is UpdateState.Checking) TextButton(onClick = updates::checkNow) { Text("Check now") }
                 }
             }
@@ -370,8 +392,7 @@ private fun ShiftSection(shift: ShiftStatusService) {
             } else {
                 SettingRow(
                     "ERP", "Not paired",
-                    detail = "Shows whether a colleague is on shift, on a break or off shift, from your organisation's ERP. " +
-                        "You approve this phone once in your browser; no password is typed here.",
+                    detail = "Shows colleagues' shift status. You approve this phone once, in your browser.",
                 )
                 if (!Brand.isBranded) {
                     OutlinedTextField(
@@ -512,14 +533,12 @@ private fun describe(status: PushStatus, appName: String): Triple<String, String
     PushStatus.Unknown -> Triple("Not set up", "Messages arrive while $appName is open.", Tone.Neutral)
     PushStatus.NoDistributor -> Triple(
         "No push app",
-        (if (BuildConfig.GOOGLE_PUSH) "This phone has no Google Play services. " else "") +
-            "$appName receives push through a UnifiedPush distributor app, which keeps the connection for it. " +
-            "Install one (for example ntfy), open it once, then check again.",
+        "Install a push app (for example ntfy), open it once, then check again.",
         Tone.Neutral,
     )
     PushStatus.ServerDisabled -> Triple(
         "Off on the server",
-        "Push is turned off on the server. Ask the administrator to enable web push in the notifications settings.",
+        "Web push is off on the server. Ask your administrator.",
         Tone.Neutral,
     )
     PushStatus.Registering -> Triple("Setting up…", null, Tone.Neutral)
@@ -531,8 +550,8 @@ private fun describe(status: PushStatus, appName: String): Triple<String, String
 private fun isHonorOrHuawei(): Boolean =
     Build.MANUFACTURER.equals("HONOR", ignoreCase = true) || Build.MANUFACTURER.equals("HUAWEI", ignoreCase = true)
 
-/** The app's page in the system notification settings (permission and channels). */
-private fun openNotificationSettings(context: Context) {
+/** The app's page in the system notification settings (permission and channels). Also the list's Fix. */
+internal fun openNotificationSettings(context: Context) {
     val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

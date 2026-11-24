@@ -136,8 +136,7 @@ fun DiagnosticsScreen(session: TalkSession?, onBack: () -> Unit) {
             item(key = "share") {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 20.dp)) {
                     Text(
-                        "The report holds everything above and the app's recent log, without passwords, " +
-                            "keys or call credentials. Send it to whoever supports the app.",
+                        "Everything above plus the recent log, without passwords.",
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.textSecondary,
                     )

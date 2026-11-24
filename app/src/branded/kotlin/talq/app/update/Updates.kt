@@ -1,15 +1,19 @@
 package talq.app.update
 
+import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,6 +46,9 @@ internal class UpdateChannel(val manifestUrl: String, val authorization: String)
     /** The manifest's host: a download link must be on it. */
     val host: String? = Uri.parse(manifestUrl).host?.lowercase()
 
+    /** The share's folder (the manifest's, with its slash): only a download in it gets [authorization]. */
+    val folder: String = manifestUrl.substringBeforeLast('/') + "/"
+
     companion object {
         fun fromBuild(): UpdateChannel? {
             val url = BuildConfig.BRAND_UPDATE_MANIFEST_URL.trim()
@@ -57,8 +64,8 @@ internal class UpdateChannel(val manifestUrl: String, val authorization: String)
 /**
  * What the channel offers, as `scripts/publish-update.sh` writes it:
  * `{"version", "versionCode", "download", "asset", "sha256", "size", "releaseDate", "notes"}`.
- * Only [download] (an https link on the channel's own server that a browser can open without a
- * password) and the version are used.
+ * Only [download] (an https link on the channel's own server; since 0.6.4 the APK next to the
+ * manifest in the same password-protected share) and the version are used.
  */
 internal data class UpdateManifest(
     val version: String,
@@ -93,6 +100,10 @@ private class UpdateProblem(message: String, val status: Int = 0) : Exception(me
  * failed check waits an hour (two when the share refuses the credentials). The offer is
  * remembered across restarts, so the banner does not wait for the next check. Android itself
  * makes sure an update comes from the same developer: it refuses an APK signed with another key.
+ *
+ * "Update" hands the APK to Android's download manager (with the share's password: the server
+ * allows no public link without one) and installs nothing: the finished download's notification,
+ * or the Downloads app, opens Android's installer.
  */
 internal class BrandedAppUpdates(private val app: Context, private val channel: UpdateChannel) : AppUpdates {
     override val enabled = true
@@ -107,6 +118,9 @@ internal class BrandedAppUpdates(private val app: Context, private val channel: 
     private var offer: UpdateManifest? = null
     @Volatile
     private var job: Job? = null
+    private val _downloading = MutableStateFlow(false)
+    override val downloading: StateFlow<Boolean> = _downloading.asStateFlow()
+    private var watch: Job? = null
 
     private val http = OkHttpClient.Builder()
         .followRedirects(false)
@@ -124,6 +138,8 @@ internal class BrandedAppUpdates(private val app: Context, private val channel: 
             // Installed meanwhile (this is that version or a later one).
             prefs.edit().remove(KEY_OFFER).apply()
         }
+        // A download started before the app was closed: the buttons stay disabled until it ends.
+        offer?.let { m -> knownDownload(m.version)?.let { id -> if (isRunning(statusOf(id))) watch(id) } }
     }
 
     override fun checkIfDue() {
@@ -174,15 +190,84 @@ internal class BrandedAppUpdates(private val app: Context, private val channel: 
 
     override fun download(): Boolean {
         val m = offer ?: return false
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(m.download))
-            .addCategory(Intent.CATEGORY_BROWSABLE)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // One download per version: a tap while it runs starts nothing (three taps used to start three
+        // downloads), and once it is done a tap opens Downloads, where the user taps it to install.
+        knownDownload(m.version)?.let { id ->
+            val status = statusOf(id)
+            if (isRunning(status)) {
+                watch(id)
+                return true
+            }
+            if (status == DownloadManager.STATUS_SUCCESSFUL) return openDownloads()
+        }
+        val uri = Uri.parse(m.download)
+        // A plain file name for Downloads (the link's own, else one made from the version).
+        val name = uri.lastPathSegment?.takeIf { FILE_NAME.matches(it) } ?: "TalQ-${m.version.filter { it.isLetterOrDigit() || it == '.' }}.apk"
+        val manager = app.getSystemService(DownloadManager::class.java) ?: return false
+        val request = DownloadManager.Request(uri)
+            .setTitle(name)
+            .setDescription("When it is done, tap here to install.")
+            .setMimeType("application/vnd.android.package-archive")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .addRequestHeader("User-Agent", talq.core.TalqCore.userAgent)
+        // The share's password only goes to the share itself (the same one the manifest came from).
+        if (channel.authorization.isNotEmpty() && m.download.startsWith(channel.folder)) {
+            request.addRequestHeader("Authorization", channel.authorization)
+        }
         return try {
-            app.startActivity(intent)
+            // Android 10 and later let any app put a download into Downloads; before that, the
+            // app's own download folder needs no storage permission either.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+            } else {
+                request.setDestinationInExternalFilesDir(app, Environment.DIRECTORY_DOWNLOADS, name)
+            }
+            val id = manager.enqueue(request)
+            prefs.edit().putLong(KEY_DOWNLOAD_ID, id).putString(KEY_DOWNLOAD_VERSION, m.version).apply()
+            watch(id)
             true
-        } catch (_: ActivityNotFoundException) {
+        } catch (e: Exception) {
+            // The download manager switched off, no shared storage: say so on the banner.
+            Log.w(TAG, "download not started: ${e.javaClass.simpleName}")
             false
         }
+    }
+
+    /** The download id started for [version], if any. */
+    private fun knownDownload(version: String): Long? =
+        prefs.getLong(KEY_DOWNLOAD_ID, -1L).takeIf { it >= 0 && prefs.getString(KEY_DOWNLOAD_VERSION, null) == version }
+
+    /** The download manager's status for [id], or null when it no longer knows it. */
+    private fun statusOf(id: Long): Int? = try {
+        app.getSystemService(DownloadManager::class.java)?.query(DownloadManager.Query().setFilterById(id))?.use { c ->
+            if (c.moveToFirst()) c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) else null
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun isRunning(status: Int?) = status == DownloadManager.STATUS_PENDING ||
+        status == DownloadManager.STATUS_RUNNING || status == DownloadManager.STATUS_PAUSED
+
+    /** Keeps [downloading] true until the download [id] ends (done, failed or removed). */
+    private fun watch(id: Long) {
+        if (watch?.isActive == true) return
+        _downloading.value = true
+        watch = scope.launch {
+            try {
+                while (isRunning(statusOf(id))) delay(1_500)
+            } finally {
+                _downloading.value = false
+            }
+        }
+    }
+
+    /** The system's Downloads list (opening it needs no permission; the user taps the APK there). */
+    private fun openDownloads(): Boolean = try {
+        app.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
     }
 
     override fun dismiss() {
@@ -213,11 +298,14 @@ internal class BrandedAppUpdates(private val app: Context, private val channel: 
         const val CHECK_EVERY_MILLIS = 2L * 60 * 60 * 1000
         const val FAILURE_PAUSE_MILLIS = 60L * 60 * 1000
         const val MANIFEST_MAX_BYTES = 256 * 1024
+        val FILE_NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.apk")
         const val KEY_LAST_CHECK = "last_check"
         const val KEY_OFFER = "offer"
         const val KEY_DISMISSED = "dismissed"
         const val KEY_LAST_FAILURE = "last_failure"
         const val KEY_FAILURE_PAUSE = "failure_pause"
+        const val KEY_DOWNLOAD_ID = "download_id"
+        const val KEY_DOWNLOAD_VERSION = "download_version"
     }
 }
 

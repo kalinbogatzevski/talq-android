@@ -94,6 +94,11 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
     }
 
     override fun retry() {
+        // At once, so whatever offered the retry (Settings, the list's notice) shows it running.
+        if (container.session != null && !loggingOut) {
+            watchdog?.cancel()
+            _status.value = PushStatus.Registering
+        }
         container.scope.launch { setUp() }
     }
 
@@ -217,7 +222,7 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
                     return fail(PushStatus.Error("The server would not hand out its push key (${result.status})."))
             }
         } catch (e: TalkError) {
-            return fail(PushStatus.Error(e.userMessage()))
+            return fail(PushStatus.Error(e.userMessage(), network = e is TalkError.Network))
         }
         try {
             // Passing the server's VAPID key makes the connector create the Web Push key pair
@@ -292,7 +297,7 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
                 session.client.webPushRegister(endpoint.url, keys.pubKey, keys.auth, APP_TYPES)
             } catch (e: TalkError) {
                 if (generation != routeGeneration) return@launch
-                fail(PushStatus.Error(e.userMessage()))
+                fail(PushStatus.Error(e.userMessage(), network = e is TalkError.Network))
                 return@launch
             }
             if (generation != routeGeneration) {
@@ -323,7 +328,8 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         if (loggingOut) return
         fail(
             PushStatus.Error(
-                when (reason) {
+                network = reason == FailedReason.NETWORK,
+                message = when (reason) {
                     FailedReason.NETWORK -> "${pushApp()} has no connection right now."
                     FailedReason.ACTION_REQUIRED ->
                         if (viaGoogle()) "$GOOGLE_ROUTE could not register $appName. Check that it is up to date and signed in."
@@ -460,7 +466,7 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         val result = try {
             session.client.webPushActivate(token)
         } catch (e: TalkError) {
-            fail(PushStatus.Error(e.userMessage()))
+            fail(PushStatus.Error(e.userMessage(), network = e is TalkError.Network))
             return
         }
         when (result) {
@@ -507,6 +513,12 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
 
         val session = awaitSession()
         if (gone(session)) return dropped(push)
+        // The conversation's newest messages, loaded alongside (one run per room at a time): a tap
+        // on this notification then opens on them instead of a spinner. Not for the one on screen.
+        if (session != null) {
+            val early = describe(push, null, session)
+            if (early.aboutChat && TalqNotifications.openChat?.token != early.token) session.prefetchChat(early.token)
+        }
         // The conversation list, reloaded alongside: it says whether the conversation is muted
         // and is what the number on the app icon is counted from.
         val roomsReload = session?.let { reloadRooms(it) }
@@ -702,7 +714,8 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         watchdog?.cancel()
         watchdog = container.scope.launch {
             delay(ANSWER_TIMEOUT_MS)
-            if (_status.value == PushStatus.Registering) _status.value = PushStatus.Error(message)
+            // No answer is most often no connection: tried again when the network is back.
+            if (_status.value == PushStatus.Registering) _status.value = PushStatus.Error(message, network = true)
         }
     }
 

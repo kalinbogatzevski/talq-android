@@ -44,3 +44,16 @@ tasks.register<JavaExec>("smoke") {
     classpath = files(main.output.allOutputs, main.runtimeDependencyFiles)
     mainClass.set("talq.core.smoke.SmokeMain")
 }
+
+// Offline checks of the conversation-folder model, its file format and folder sync (merge, policy,
+// and the cycle and probe against an in-memory server; see FolderCheck.kt): no network, no env
+// file, nothing written. Exits non-zero on any failed check.
+//   ./gradlew :shared:folderCheck
+tasks.register<JavaExec>("folderCheck") {
+    group = "verification"
+    description = "Check the folder model, codec and sync against the desktop test vectors (offline)."
+    val main = kotlin.jvm().compilations.getByName("main")
+    dependsOn(main.compileTaskProvider)
+    classpath = files(main.output.allOutputs, main.runtimeDependencyFiles)
+    mainClass.set("talq.core.smoke.FolderCheck")
+}

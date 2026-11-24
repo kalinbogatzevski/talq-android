@@ -21,7 +21,8 @@ enum class ThemeChoice(val id: String, val label: String, val description: Strin
 
 /**
  * How the app looks, on this device. Not tied to an account: signing out keeps it. Read
- * synchronously at start (a small preferences file) so the first frame already has the theme.
+ * synchronously at start (a small preferences file) so the first frame already has the theme
+ * (and whether the list shows folders).
  */
 class AppearanceStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("appearance", Context.MODE_PRIVATE)
@@ -41,8 +42,24 @@ class AppearanceStore(context: Context) {
         prefs.edit().putFloat(KEY_LIST_WIDTH, dp).apply()
     }
 
+    private val _showFolders = MutableStateFlow(prefs.getBoolean(KEY_SHOW_FOLDERS, false))
+
+    /**
+     * "Show folders": the conversation list is drawn in its folders. On this device for every
+     * account, never synced (another device of the user may show its list flat). Creating the first
+     * folder turns it on.
+     */
+    val showFolders: StateFlow<Boolean> = _showFolders.asStateFlow()
+
+    fun setShowFolders(on: Boolean) {
+        if (_showFolders.value == on) return
+        _showFolders.value = on
+        prefs.edit().putBoolean(KEY_SHOW_FOLDERS, on).apply()
+    }
+
     private companion object {
         const val KEY_THEME = "theme"
+        const val KEY_SHOW_FOLDERS = "show_folders"
         const val KEY_LIST_WIDTH = "list_pane_width_dp"
         const val DEFAULT_LIST_WIDTH_DP = 360f
     }

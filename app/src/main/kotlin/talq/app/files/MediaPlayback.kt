@@ -63,12 +63,14 @@ fun newMediaPlayer(context: Context, files: TalkFiles, speech: Boolean = false):
  * stops the first. [stop] (leaving the chat, the app going to the background, signing out)
  * releases the player. Main thread only.
  *
+ * @param recording a voice message is being recorded: nothing starts (it would be in the message)
  * @param onFailed streaming did not work for this file (the caller falls back to download-and-open)
  */
 class VoicePlayer(
     private val context: Context,
     private val scope: CoroutineScope,
     private val session: () -> TalkSession?,
+    private val recording: () -> Boolean,
     private val onFailed: (RichObject) -> Unit,
 ) {
     /** [fileId] empty = nothing loaded. */
@@ -112,6 +114,7 @@ class VoicePlayer(
 
     /** Play [file], or pause/resume it when it is the one loaded. */
     fun toggle(file: RichObject) {
+        if (recording()) return
         val loaded = player
         if (loaded != null && current?.id == file.id) {
             if (loaded.isPlaying || (loaded.playWhenReady && loaded.playbackState == Player.STATE_BUFFERING)) loaded.pause() else loaded.play()

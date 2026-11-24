@@ -4,7 +4,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
+import talq.app.ui.common.UiLocale
 import talq.app.files.PendingUpload
 import talq.core.model.ChatMessage
 import talq.core.repo.OutboxMessage
@@ -113,7 +113,7 @@ fun buildChatItems(
 }
 
 private fun dayLabel(day: LocalDate, today: LocalDate): String {
-    val locale = Locale.getDefault()
+    val locale = UiLocale
     return when {
         day == today -> "Today"
         day == today.minusDays(1) -> "Yesterday"

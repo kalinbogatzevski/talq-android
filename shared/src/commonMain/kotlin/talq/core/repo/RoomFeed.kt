@@ -30,6 +30,8 @@ internal class RoomFeed(
     private val client: TalkClient,
     private val token: String,
     private val scope: CoroutineScope,
+    /** The session's [Waker]: the network is usable again, a failed poll goes now. */
+    private val waker: Waker,
 ) {
     private val _incoming = MutableSharedFlow<List<ChatMessage>>(extraBufferCapacity = 64)
     private val _error = MutableStateFlow<TalkError?>(null)
@@ -95,9 +97,17 @@ internal class RoomFeed(
         var from = cursor.filterNotNull().first()
         var backoff = MIN_BACKOFF
         while (scope.isActive) {
+            val wakes = waker.mark()
             try {
                 val asked = TimeSource.Monotonic.markNow()
-                val page = client.pollMessages(token, from, lastCommonReadId = _commonRead.value)
+                // After a failure the server is asked to answer at once (no 30 s wait), so a
+                // working connection clears the error, and its line, without delay.
+                val wait = if (_error.value != null) RECOVERY_WAIT_SECONDS else POLL_WAIT_SECONDS
+                // The network came back meanwhile: this poll may be on a dead connection. Asked
+                // again at once from the same cursor (it only moves on an answer: nothing is lost).
+                val page = waker.unlessWoken {
+                    client.pollMessages(token, from, timeoutSeconds = wait, lastCommonReadId = _commonRead.value)
+                } ?: continue
                 _error.value = null
                 noteCommonRead(page.lastCommonRead)
                 backoff = MIN_BACKOFF
@@ -117,8 +127,13 @@ internal class RoomFeed(
                 _error.value = e
                 // A dead session or a room we were removed from will not heal by hammering it.
                 val fatal = e is TalkError.Unauthorized || e is TalkError.NotFound || e is TalkError.Forbidden
-                delay(if (fatal) MAX_BACKOFF else backoff)
-                backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF)
+                if (fatal) {
+                    delay(MAX_BACKOFF)
+                } else {
+                    // The network usable again ends the wait, and the backoff starts over.
+                    val woken = waker.pause(backoff, since = wakes)
+                    backoff = if (woken) MIN_BACKOFF else (backoff * 2).coerceAtMost(MAX_BACKOFF)
+                }
             }
         }
     }
@@ -126,6 +141,8 @@ internal class RoomFeed(
     private companion object {
         const val MIN_BACKOFF = 2_000L
         const val MAX_BACKOFF = 30_000L
+        const val POLL_WAIT_SECONDS = 30
+        const val RECOVERY_WAIT_SECONDS = 1
         val QUICK_ANSWER = 3.seconds
     }
 }

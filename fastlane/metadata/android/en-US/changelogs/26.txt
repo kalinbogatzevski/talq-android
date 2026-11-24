@@ -1,0 +1,1 @@
+0.8.1: Your status is now at the top of the conversation list, under your name. Tap it to change it. A search field now filters your conversations by name as you type. The + in the header starts a chat with a person, a new group or your Note to self.

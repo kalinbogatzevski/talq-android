@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import talq.app.appName
 import talq.app.theme.TalqTheme
 import talq.app.update.AppUpdates
@@ -24,11 +25,9 @@ import talq.app.update.UpdateState
 fun showsUpdateBanner(state: UpdateState, dismissed: String?): Boolean =
     state is UpdateState.Available && state.version != dismissed
 
-/** How to install what "Update" downloads: the browser does the download, the user opens it. */
+/** How to install what "Update" downloads: Android's download manager fetches it, the user opens it. */
 @Composable
-fun updateHowTo(): String =
-    "Update opens the download in your browser. When it is done, open the file and confirm to install. " +
-        "Text you have not sent yet is lost when ${appName()} restarts."
+fun updateHowTo(): String = "Tap Update, then tap the finished download to install."
 
 /** The branded build's update offer at the top of the conversation list. */
 @Composable
@@ -36,7 +35,9 @@ fun UpdateBanner(state: UpdateState, updates: AppUpdates) {
     if (state !is UpdateState.Available) return
     val colors = TalqTheme.colors
     val app = appName()
-    var noBrowser by remember { mutableStateOf(false) }
+    // null: not tapped yet; true: the download started; false: it could not start.
+    var started by remember { mutableStateOf<Boolean?>(null) }
+    val downloading by updates.downloading.collectAsStateWithLifecycle()
     Column(
         Modifier
             .fillMaxWidth()
@@ -45,13 +46,19 @@ fun UpdateBanner(state: UpdateState, updates: AppUpdates) {
     ) {
         Text("$app ${state.version} is available", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
         Text(
-            if (noBrowser) "No browser on this phone could open the download." else updateHowTo(),
+            when (started) {
+                true -> if (downloading) "Downloading\u2026" else "Tap the finished download to install."
+                false -> "The download could not be started on this phone."
+                null -> updateHowTo()
+            },
             style = MaterialTheme.typography.bodySmall,
-            color = if (noBrowser) colors.danger else colors.textSecondary,
+            color = if (started == false) colors.danger else colors.textSecondary,
             modifier = Modifier.padding(top = 2.dp, end = 8.dp),
         )
         Row {
-            TextButton(onClick = { noBrowser = !updates.download() }) { Text("Update") }
+            TextButton(onClick = { started = updates.download() }, enabled = !downloading) {
+                Text(if (downloading) "Downloading\u2026" else "Update")
+            }
             TextButton(onClick = updates::dismiss) { Text("Not now", color = colors.textSecondary) }
         }
     }

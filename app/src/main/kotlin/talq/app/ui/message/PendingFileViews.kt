@@ -48,7 +48,7 @@ import talq.app.theme.TalqTheme
  * Like a failed text, it stays until the user decides.
  */
 @Composable
-fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> Unit) {
+fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> Unit, caption: String = upload.caption) {
     val colors = TalqTheme.colors
     val context = LocalContext.current
     val state = upload.state
@@ -132,9 +132,9 @@ fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> 
                     }
                 }
             }
-            if (upload.caption.isNotEmpty()) {
+            if (caption.isNotEmpty()) {
                 Text(
-                    upload.caption,
+                    caption,
                     style = MaterialTheme.typography.bodyLarge,
                     color = colors.textPrimary,
                     maxLines = 4,
