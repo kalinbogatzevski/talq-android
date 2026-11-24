@@ -9,6 +9,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -89,6 +90,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import talq.core.TalkError
 import talq.core.model.NotificationLevel
+import talq.core.model.TalkThreadInfo
 import talq.core.model.VoicePlace
 import talq.core.model.copiedMessages
 import talq.core.repo.OutboxStatus
@@ -97,6 +99,15 @@ import talq.core.shift.ShiftState
 
 /** How often the conversation list (and with it the presence) is reloaded while a one-to-one chat is in front. */
 private const val PRESENCE_REFRESH_MILLIS = 30_000L
+
+/**
+ * A top bar narrower than this keeps only Call and More as buttons and puts Video call, Mute
+ * topic and All topics in More, so the name keeps its room. Five buttons take 240 dp, avatar and
+ * insets about 60 dp more, a back arrow 48 dp: at 600 dp a typical 16-letter name still fits
+ * beside all of them at a large font setting. Every phone held upright is below it, and so is
+ * a tablet's conversation beside the list when the tablet is upright.
+ */
+private val FullBarMinWidth = 600.dp
 
 /**
  * An open conversation: ONE screen (one back-stack entry) for all of it. The top bar always
@@ -294,6 +305,9 @@ fun RoomHostScreen(
         RoomTab.General -> "General"
         is RoomTab.Topic -> topicTitle(shown.id)
     }
+    // The tab the strip shows as selected; null while there is no strip (a room without topics
+    // and no topic being started).
+    val stripTab = shown?.takeIf { hasTopics || draft != null }
     val openTopic = (shown as? RoomTab.Topic)?.takeIf { draft == null }?.let { topicsById[it.id] }
     val canStartTopic = session.supportsTopics && !readOnly
     val maxLength = session.capabilities.maxMessageLength.takeIf { it > 0 } ?: 32_000
@@ -351,80 +365,80 @@ fun RoomHostScreen(
                     onCancel = { selection.clear() },
                 )
             } else {
-                // Name + status line + tab name are three lines of text: on a large font setting
-                // they are taller than the standard bar, which would cut the last one.
-                val subtitleShown = draft != null || tabName.isNotEmpty()
-                val threeLines = direct != null && hasStatusLine(direct, shift) && subtitleShown
-                val barHeight = if (!threeLines) TopAppBarDefaults.TopAppBarExpandedHeight else {
-                    with(LocalDensity.current) { (22 + 16 + 16).sp.toDp() + 8.dp }
-                        .coerceAtLeast(TopAppBarDefaults.TopAppBarExpandedHeight)
+                // The tab's name only where nothing else on screen says it: the strip's selected
+                // chip already does. A topic being started keeps "New topic:", which says it does
+                // not exist yet.
+                val subtitle = when {
+                    draft != null -> "New topic: ${draft.title}"
+                    stripTab != null && chips.any { it.tab == stripTab } -> ""
+                    else -> tabName
                 }
-                TopAppBar(
-                    expandedHeight = barHeight,
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (direct != null) {
-                                StatusAvatar(
-                                    url = session.client.roomAvatarUrl(token, direct.avatarVersion, !TalqTheme.colors.isLight),
-                                    authorization = session.client.authorizationHeader,
-                                    name = roomName,
-                                    ring = MaterialTheme.colorScheme.surface,
-                                    size = 36.dp,
-                                    presence = direct.status,
-                                    shift = shift?.state ?: ShiftState.Unknown,
-                                )
-                            } else {
-                                Avatar(
-                                    url = session.client.roomAvatarUrl(token, room?.avatarVersion ?: "", !TalqTheme.colors.isLight),
-                                    authorization = session.client.authorizationHeader,
-                                    name = roomName,
-                                    size = 36.dp,
-                                )
-                            }
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(roomName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                // One-to-one: line 2 is the person (shift, presence); a tab name,
-                                // when there is one, moves to line 3 so the shift is never lost.
-                                if (direct != null && hasStatusLine(direct, shift)) StatusLine(direct, shift)
-                                val subtitle = if (draft != null) "New topic: ${draft.title}" else tabName
-                                if (subtitle.isNotEmpty()) {
-                                    Text(
-                                        subtitle,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = colors.textSecondary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
+                val statusShown = direct != null && hasStatusLine(direct, shift)
+                // On a large font setting the name and the lines under it can be taller than the
+                // standard bar, which would cut the last one.
+                val linesUnderName = (if (statusShown) 1 else 0) + (if (subtitle.isNotEmpty()) 1 else 0)
+                val barHeight = with(LocalDensity.current) { (22 + 16 * linesUnderName).sp.toDp() + 8.dp }
+                    .coerceAtLeast(TopAppBarDefaults.TopAppBarExpandedHeight)
+                // The bar's own width, not the window's: beside the list the room has only part
+                // of it.
+                BoxWithConstraints {
+                    val narrow = maxWidth < FullBarMinWidth
+                    TopAppBar(
+                        expandedHeight = barHeight,
+                        title = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (direct != null) {
+                                    StatusAvatar(
+                                        url = session.client.roomAvatarUrl(token, direct.avatarVersion, !TalqTheme.colors.isLight),
+                                        authorization = session.client.authorizationHeader,
+                                        name = roomName,
+                                        ring = MaterialTheme.colorScheme.surface,
+                                        size = 36.dp,
+                                        presence = direct.status,
+                                        shift = shift?.state ?: ShiftState.Unknown,
+                                    )
+                                } else {
+                                    Avatar(
+                                        url = session.client.roomAvatarUrl(token, room?.avatarVersion ?: "", !TalqTheme.colors.isLight),
+                                        authorization = session.client.authorizationHeader,
+                                        name = roomName,
+                                        size = 36.dp,
                                     )
                                 }
+                                Spacer(Modifier.width(10.dp))
+                                Column {
+                                    Text(roomName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    // One-to-one: line 2 is the person (shift, presence); a third
+                                    // line, when there is one, goes under it so the shift is never lost.
+                                    if (statusShown && direct != null) StatusLine(direct, shift)
+                                    if (subtitle.isNotEmpty()) {
+                                        Text(
+                                            subtitle,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = colors.textSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
                             }
-                        }
-                    },
-                    navigationIcon = {
-                        if (showBack) {
-                            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-                        }
-                    },
-                    actions = {
-                        if (canCall) {
+                        },
+                        navigationIcon = {
+                            if (showBack) {
+                                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                            }
+                        },
+                        actions = {
                             // During a call these return to it instead of placing another one.
                             fun call(video: Boolean) = context.startActivity(
                                 if (calls.busy) CallActivity.showIntent(context) else CallActivity.outgoingIntent(context, token, video),
                             )
-                            IconButton(onClick = { call(video = false) }) {
-                                Icon(Icons.Outlined.Call, contentDescription = "Call")
-                            }
-                            IconButton(onClick = { call(video = true) }) {
-                                Icon(Icons.Outlined.Videocam, contentDescription = "Video call")
-                            }
-                        }
-                        // One tap mutes the open topic (Never) or unmutes it (the usual setting);
-                        // the long-press menu keeps the finer levels.
-                        if (openTopic != null) {
-                            val level = openTopic.attendee.notificationLevel
-                            val muted = level == NotificationLevel.NEVER
-                            IconButton(onClick = {
-                                val id = openTopic.id
+                            // One tap mutes the open topic (Never) or unmutes it (the usual setting);
+                            // the long-press menu keeps the finer levels.
+                            fun toggleMute(topic: TalkThreadInfo) {
+                                val id = topic.id
+                                val level = topic.attendee.notificationLevel
+                                val muted = level == NotificationLevel.NEVER
                                 vm.setNotificationLevel(id, if (muted) NotificationLevel.DEFAULT else NotificationLevel.NEVER)
                                 noticeScope.launch {
                                     val answer = snackbar.showSnackbar(
@@ -434,81 +448,129 @@ fun RoomHostScreen(
                                     )
                                     if (answer == SnackbarResult.ActionPerformed) vm.setNotificationLevel(id, level)
                                 }
-                            }) {
-                                Icon(
-                                    if (muted) Icons.Outlined.NotificationsOff else Icons.Outlined.Notifications,
-                                    contentDescription = if (muted) "Unmute topic" else "Mute topic",
-                                    tint = if (muted) colors.textMuted else LocalContentColor.current,
-                                )
                             }
-                        }
-                        if (hasTopics) {
-                            IconButton(onClick = { sheetOpen = true }) {
-                                Icon(Icons.AutoMirrored.Outlined.ListAlt, contentDescription = "All topics")
+                            val muted = openTopic?.attendee?.notificationLevel == NotificationLevel.NEVER
+                            // On a narrow bar Video call, Mute topic and All topics are the first
+                            // items of More instead: the name gets the room.
+                            if (canCall) {
+                                IconButton(onClick = { call(video = false) }) {
+                                    Icon(Icons.Outlined.Call, contentDescription = "Call")
+                                }
+                                if (!narrow) {
+                                    IconButton(onClick = { call(video = true) }) {
+                                        Icon(Icons.Outlined.Videocam, contentDescription = "Video call")
+                                    }
+                                }
                             }
-                        }
-                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            if (openTopic != null) {
+                            if (!narrow && openTopic != null) {
+                                IconButton(onClick = { toggleMute(openTopic) }) {
+                                    Icon(
+                                        if (muted) Icons.Outlined.NotificationsOff else Icons.Outlined.Notifications,
+                                        contentDescription = if (muted) "Unmute topic" else "Mute topic",
+                                        tint = if (muted) colors.textMuted else LocalContentColor.current,
+                                    )
+                                }
+                            }
+                            if (!narrow && hasTopics) {
+                                IconButton(onClick = { sheetOpen = true }) {
+                                    Icon(Icons.AutoMirrored.Outlined.ListAlt, contentDescription = "All topics")
+                                }
+                            }
+                            IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
+                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                if (narrow && canCall) {
+                                    DropdownMenuItem(
+                                        text = { Text("Video call") },
+                                        leadingIcon = { Icon(Icons.Outlined.Videocam, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            call(video = true)
+                                        },
+                                    )
+                                }
+                                if (narrow && openTopic != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (muted) "Unmute topic" else "Mute topic") },
+                                        leadingIcon = {
+                                            Icon(if (muted) Icons.Outlined.NotificationsOff else Icons.Outlined.Notifications, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            menuOpen = false
+                                            toggleMute(openTopic)
+                                        },
+                                    )
+                                }
+                                if (narrow && hasTopics) {
+                                    DropdownMenuItem(
+                                        text = { Text("All topics") },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Outlined.ListAlt, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            sheetOpen = true
+                                        },
+                                    )
+                                }
+                                if (openTopic != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Topic notifications") },
+                                        onClick = {
+                                            menuOpen = false
+                                            menuFor = RoomTab.Topic(openTopic.id)
+                                        },
+                                    )
+                                }
+                                // With a strip, "+" on it starts a topic; without one, this does.
+                                if (canStartTopic && !hasTopics) {
+                                    DropdownMenuItem(
+                                        text = { Text("New topic") },
+                                        leadingIcon = { Icon(Icons.Outlined.Forum, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            newTopic = true
+                                        },
+                                    )
+                                }
+                                // The schedule endpoints answer only where the user may write.
+                                if (session.capabilities.scheduledMessages && !readOnly) {
+                                    DropdownMenuItem(
+                                        text = { Text("Scheduled messages") },
+                                        leadingIcon = { Icon(Icons.Outlined.Schedule, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            scheduledOpen = true
+                                        },
+                                    )
+                                }
+                                if (session.capabilities.sharedItems) {
+                                    DropdownMenuItem(
+                                        text = { Text("Shared files") },
+                                        leadingIcon = { Icon(Icons.Outlined.PermMedia, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            onOpenSharedFiles()
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
-                                    text = { Text("Topic notifications") },
+                                    text = { Text("Refresh") },
                                     onClick = {
                                         menuOpen = false
-                                        menuFor = RoomTab.Topic(openTopic.id)
+                                        vm.refresh(byUser = true, shown = shown?.takeIf { draft == null })
                                     },
                                 )
                             }
-                            // With a strip, "+" on it starts a topic; without one, this does.
-                            if (canStartTopic && !hasTopics) {
-                                DropdownMenuItem(
-                                    text = { Text("New topic") },
-                                    leadingIcon = { Icon(Icons.Outlined.Forum, contentDescription = null) },
-                                    onClick = {
-                                        menuOpen = false
-                                        newTopic = true
-                                    },
-                                )
-                            }
-                            // The schedule endpoints answer only where the user may write.
-                            if (session.capabilities.scheduledMessages && !readOnly) {
-                                DropdownMenuItem(
-                                    text = { Text("Scheduled messages") },
-                                    leadingIcon = { Icon(Icons.Outlined.Schedule, contentDescription = null) },
-                                    onClick = {
-                                        menuOpen = false
-                                        scheduledOpen = true
-                                    },
-                                )
-                            }
-                            if (session.capabilities.sharedItems) {
-                                DropdownMenuItem(
-                                    text = { Text("Shared files") },
-                                    leadingIcon = { Icon(Icons.Outlined.PermMedia, contentDescription = null) },
-                                    onClick = {
-                                        menuOpen = false
-                                        onOpenSharedFiles()
-                                    },
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Refresh") },
-                                onClick = {
-                                    menuOpen = false
-                                    vm.refresh(byUser = true, shown = shown?.takeIf { draft == null })
-                                },
-                            )
-                        }
-                    },
-                )
+                        },
+                    )
+                }
             }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            if ((hasTopics || draft != null) && shown != null) {
+            if (stripTab != null) {
                 TopicStrip(
                     // A room that has no topics yet shows only the one being started.
                     chips = if (hasTopics) chips else emptyList(),
-                    selected = shown,
+                    selected = stripTab,
                     onSelect = vm::select,
                     onNew = if (canStartTopic) ({ newTopic = true }) else null,
                     onLongPress = { tab -> if (tab != RoomTab.All) menuFor = tab },

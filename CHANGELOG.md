@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.2
+
+- **Conversation header**: the name gets the room; on a narrow screen Video call, Mute topic and
+  All topics are in the ⋮ menu. The status line ends in "…" when it does not fit, and the tab
+  name is no longer repeated under the name when the topic strip shows it.
+
 ## 0.9.1
 
 - **Forward one message** straight from its touch-and-hold menu (no need to Select first).

@@ -20,7 +20,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import talq.app.theme.TalqColors
@@ -157,39 +160,43 @@ fun StatusAvatar(
  * The status line under a one-to-one conversation's name: a painted disc and the shift label
  * in the state's colour (only when the shift is known), then " · " and the presence: the
  * person's status message with its icon when they set one, else the word, in the presence
- * colour. The shift part is never cut short; the presence part gives way first.
- * Draws nothing when there is neither.
+ * colour. One line of one text, so what does not fit ends in "…": the presence part, last,
+ * gives way first. Draws nothing when there is neither.
  */
 @Composable
 fun StatusLine(room: Room, shift: ShiftEntry?, modifier: Modifier = Modifier) {
     val colors = TalqTheme.colors
     val work = shiftLabel(shift)
-    val workColor = shift?.let { shiftColor(it.state, colors) }
+    // Null when no shift part is drawn.
+    val workColor = shift?.let { shiftColor(it.state, colors) }?.takeIf { work.isNotEmpty() }
     val message = room.statusMessage.replace('\n', ' ').trim()
     val presence = when {
         message.isNotEmpty() -> if (room.statusIcon.isBlank()) message else "${room.statusIcon.trim()} $message"
         else -> presenceWord(room.status)
     }
     val presenceInk = if (message.isNotEmpty()) colors.textMuted else presenceColor(room.status, colors) ?: colors.textMuted
-    if (work.isEmpty() && presence.isEmpty()) return
-    val style = MaterialTheme.typography.labelSmall
+    if (workColor == null && presence.isEmpty()) return
+    // One text, not one per part: a part laid in a row of its own is cut at the edge with no
+    // "…" when the line is short, and leaves the parts after it no room for theirs.
+    val line = buildAnnotatedString {
+        if (workColor != null) {
+            withStyle(SpanStyle(color = workColor)) { append(work) }
+            if (presence.isNotEmpty()) withStyle(SpanStyle(color = colors.textMuted)) { append(" · ") }
+        }
+        if (presence.isNotEmpty()) withStyle(SpanStyle(color = presenceInk)) { append(presence) }
+    }
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        if (work.isNotEmpty() && workColor != null) {
+        if (workColor != null) {
             Canvas(Modifier.size(7.dp).clearAndSetSemantics { }) { drawCircle(workColor) }
             Spacer(Modifier.width(5.dp))
-            Text(work, style = style, color = workColor, maxLines = 1, softWrap = false)
-            if (presence.isNotEmpty()) Text(" · ", style = style, color = colors.textMuted, maxLines = 1, softWrap = false)
         }
-        if (presence.isNotEmpty()) {
-            Text(
-                presence,
-                style = style,
-                color = presenceInk,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-        }
+        Text(
+            line,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
     }
 }
 

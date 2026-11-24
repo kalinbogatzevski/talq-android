@@ -1,0 +1,1 @@
+0.9.2: The conversation header gives the name more room. On a narrow screen, Video call, Mute topic and All topics are in the ⋮ menu; the status line ends in "…" when it does not fit, and the tab name is not repeated above the topic strip.
