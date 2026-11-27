@@ -1,5 +1,6 @@
 package talq.app.diag
 
+import talq.core.org.hideInviteCodes
 import android.content.Context
 import android.content.Intent
 import android.os.Process
@@ -33,7 +34,8 @@ object DiagStore {
  */
 object DiagReport {
     private val SECRET = Regex("""(?i)\b(password|passwd|ticket|token|credential|secret|authorization|api[-_]?key|apikey|key)\b(\s*[=:]\s*|\s+)\S+""")
-    private val QUERY = Regex("""(https?|wss?)://([^\s/?#]+)([^\s?#]*)\?\S*""")
+    /** The query of any address, whatever its scheme (`talq://organisation?code=…` included). */
+    private val QUERY = Regex("""([a-z][a-z0-9+.-]*)://([^\s/?#]*)([^\s?#]*)\?\S*""", RegexOption.IGNORE_CASE)
 
     fun text(checks: List<Check>, log: String): String = buildString {
         append("TalQ diagnostics\n================\n")
@@ -74,6 +76,8 @@ object DiagReport {
     fun redact(text: String): String = text.lineSequence().joinToString("\n") { line ->
         line.replace(QUERY) { "${it.groupValues[1]}://${it.groupValues[2]}${it.groupValues[3]}?<hidden>" }
             .replace(SECRET) { "${it.groupValues[1]}${it.groupValues[2]}<hidden>" }
+            // Real invite codes only (a matching check symbol): ordinary 17-letter words stay.
+            .let(::hideInviteCodes)
     }
 
     /** Writes the report into the shared cache and opens the share sheet for it. */

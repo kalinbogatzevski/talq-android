@@ -317,7 +317,10 @@ fun ChatListScreen(
         }
     }
     val unpaired = erpLink is ErpLink.NotPaired || erpLink is ErpLink.Rejected
-    val pairShown = Brand.isBranded && erpLinkKnown && unpaired && pairReminder.due && !searching
+    // The reminder is for an ERP the app was given (branded build, organisation), not one to type.
+    val organisation by container.organisation.state.collectAsStateWithLifecycle()
+    val erpGiven = Brand.isBranded || organisation?.erp != null
+    val pairShown = erpGiven && erpLinkKnown && unpaired && pairReminder.due && !searching
     // Under the header, one line at most: the connection (no network, or the server not answering;
     // the list's failed reloads say nothing else then), else "notifications are off". With no list
     // yet the empty pane says it instead. Offline, push looks broken too: its line waits.

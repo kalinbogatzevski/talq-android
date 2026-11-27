@@ -59,6 +59,7 @@ import talq.app.folders.FolderController
 import talq.app.nav.DeepLink
 import talq.app.net.NetLink
 import talq.app.net.NetworkWatch
+import talq.app.org.OrganisationController
 import talq.app.push.MessageActions
 import talq.app.push.NoOpPushRegistrar
 import talq.app.push.NotificationGate
@@ -152,6 +153,9 @@ class AppContainer(context: Context) {
     /** How the app looks on this phone (theme); not tied to an account. */
     val appearance = AppearanceStore(appContext)
 
+    /** Organisation mode (0.11.0): an invite code's server, ERP address and look. Signing out keeps it. */
+    val organisation = OrganisationController(appContext, scope)
+
     /** What the conversation list is sorted by on this phone (see [ListSortStore]); not tied to an account. */
     val listSort = ListSortStore(appContext, scope)
 
@@ -171,10 +175,10 @@ class AppContainer(context: Context) {
     val badge = UnreadBadge(appContext, notifyLevels, { session })
 
     /** Shift status of colleagues from the organisation's ERP, and the pairing with it (see [ShiftStatusService]). */
-    val shift = ShiftStatusService(appContext, scope) { bringToFront() }
+    val shift = ShiftStatusService(appContext, scope, { fixedErp }) { bringToFront() }
 
     /** Conversation folders of the signed-in account, and their opt-in sync with the user's own Files (see [FolderController]). */
-    val folders = FolderController(appContext, scope, appearance)
+    val folders = FolderController(appContext, scope, appearance) { !Brand.isBranded && organisation.state.value != null }
 
     /** The user's own status: read after sign-in and on coming to the front, set in Settings (see [OwnStatusController]). */
     val ownStatus = OwnStatusController(scope)

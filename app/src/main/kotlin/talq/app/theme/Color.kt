@@ -3,6 +3,7 @@ package talq.app.theme
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.luminance
 
 /**
@@ -57,7 +58,15 @@ data class TalqColors(
     val codeBg: Color,
     /** Author identity hues, as text on [bgPrimary]. */
     val authorInks: List<Color>,
+    /**
+     * The ink on an accent fill when an organisation's colour replaced the accent (organisation mode,
+     * 0.11.0): [inkOn] of that colour. Unspecified in the four palettes, which keep [controlInk].
+     */
+    val accentInk: Color = Color.Unspecified,
 ) {
+    /** The ink for icons and text on an [accent] fill: the palette's [controlInk], or the organisation colour's readable one. */
+    val onAccent: Color get() = if (accentInk.isSpecified) accentInk else controlInk
+
     /**
      * The fill behind `inline code` in running text: the ink itself, faint, so it sits on both
      * bubble fills (a peer's and your own) in every theme. [codeBg] stays for fenced blocks; as an
@@ -99,6 +108,9 @@ val AvatarFills = listOf(
     Color(0xFF7C5FC0), Color(0xFFC75A90), Color(0xFF2F8FA1), Color(0xFF3F7FB3),
 )
 
+// KEEP IN STEP: the grounds, inks and accent tokens of the four palettes below are copied into
+// talq.core.org.THEME_GROUNDS (shared/.../org/OrgColors.kt), which fits an organisation's colour to
+// each theme for the phone and reports it in the owner's issuing tool. Change both together.
 val VividColors = TalqColors(
     isLight = false,
     bgPrimary = Color(0xFF271D12),

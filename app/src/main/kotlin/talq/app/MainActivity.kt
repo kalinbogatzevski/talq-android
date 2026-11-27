@@ -11,10 +11,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import talq.app.nav.DeepLink
+import talq.app.net.NetLink
 import talq.app.nav.TalqRoot
 import talq.app.theme.ThemedSystemBars
 import talq.app.theme.TalqTheme
+import talq.app.theme.TalqAppTheme
 
 class MainActivity : ComponentActivity() {
     /**
@@ -53,8 +56,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) handleDeepLink(intent)
         appContainer.showSaved()
         setContent {
-            val theme by appContainer.appearance.theme.collectAsStateWithLifecycle()
-            TalqTheme(theme) {
+            TalqAppTheme(appContainer) {
                 ThemedSystemBars(this, TalqTheme.colors.isLight)
                 TalqRoot(appContainer)
             }
@@ -85,6 +87,10 @@ class MainActivity : ComponentActivity() {
         // A start in the background (a push) may have found no network. Now that the app is in
         // front, try again instead of leaving the user on the "can't reach the server" screen.
         appContainer.restoreIfUnreachable()
+        // Organisation mode: the brand file again when it is due (every few days, in front, online).
+        appContainer.scope.launch {
+            appContainer.organisation.refreshIfDue(online = appContainer.network.link.value == NetLink.Usable)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -98,10 +104,26 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return
         // Reopened from the recents list: the intent is the old one, don't jump again.
         if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        // Organisation mode's link (public app only): it only offers a code, for the screen in front
+        // to look up and show as a card. Kept nowhere else; never logged.
+        val data = intent.data
+        if (intent.action == Intent.ACTION_VIEW && data?.scheme == "talq" && data.host == "organisation") {
+            if (!Brand.isBranded) {
+                val code = intent.getStringExtra(EXTRA_ORG_CODE) ?: data.getQueryParameter("code")
+                if (!code.isNullOrBlank()) appContainer.organisation.pendingCode.value = code.take(40)
+            }
+            return
+        }
         DeepLink.fromIntent(this, intent)?.let { appContainer.pendingDeepLink.value = it }
     }
 
-    private companion object {
-        const val FIRST_FRAME_MILLIS = 300L
+    companion object {
+        /**
+         * The invite code in a `talq://organisation` intent from another app (the transfer version):
+         * an extra, not the address, so it stays out of anything that prints intents' addresses.
+         */
+        const val EXTRA_ORG_CODE = "talq.organisation.code"
+
+        private const val FIRST_FRAME_MILLIS = 300L
     }
 }

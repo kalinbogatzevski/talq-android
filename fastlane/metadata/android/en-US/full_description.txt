@@ -36,6 +36,7 @@ TalQ is a native client for Nextcloud Talk, built with Kotlin and Jetpack Compos
 <ul>
 <li>Sign in through your browser (Nextcloud Login Flow v2): the app never sees your password. The app password it gets is encrypted with a key held in the Android Keystore and revoked when you sign out (if your server can be reached then).</li>
 <li>Phones, tablets and foldables, with touch, mouse and keyboard. Four themes, as on desktop (Ember, Warm, Vivid, Paper), or following the phone's light/dark setting.</li>
+<li>Use with an organisation: an invite code from your organisation sets its server and look.</li>
 <li>Optional shift status from your organisation's ERP.</li>
 <li>No analytics, no advertising, no trackers.</li>
 </ul>

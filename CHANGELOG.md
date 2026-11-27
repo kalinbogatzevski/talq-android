@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.11.0
+
+- **Use with an organisation**: the sign-in screen has one more button. An organisation's invite code sets the
+  server (fixed from then on), the ERP address for shift status, and the organisation's name, logo, colour,
+  default theme and a welcome line. A code is random, 17 characters, and cannot be guessed or forged: the
+  organisation's settings come from a file that only its code opens and only the developer can sign. Signing
+  out keeps the organisation; "Use without an organisation" goes back to the public app.
+- **The organisation's colour** takes the place of the teal on all four themes, made lighter or darker where
+  needed so that text and icons stay readable; where no shade of it would, the theme keeps its own.
+- **A link opens it**: `talq://organisation` with a code shows the organisation's card; nothing changes without
+  your tap. Signed in to that organisation's own server, the card applies the organisation (its look, its ERP
+  address and its fixed server) without a new sign-in.
+- **TalQ for desktop shows that you use TalQ Android**, and which version, beside your name: the app tells the
+  people in a conversation it has open, and in a call.
+- **The sign-in stays on the organisation's server**: a server that sends the sign-in anywhere else is refused.
+- **The organisation's file is looked at again every few days**: a new logo or colour arrives by itself; a new
+  server address is shown on the sign-in screen and taken only when you tap it.
+- **Folder sync starts on** with an organisation.
+- **Settings > About > Privacy** opens the privacy text, which now also lists the public STUN server used when
+  your Nextcloud names none, what goes to the call servers, when push moves to Google, what the Diagnostics
+  report holds, and that uninstalling does not revoke the app password.
+- **Diagnostics** says whether an organisation is set (with its random id) and keeps anything shaped like an
+  invite code, and the queries of all addresses, out of the shared log.
+
 ## 0.10.0
 
 - **Opens on your conversations at once**, also offline: the list as you last saw it, kept encrypted on the

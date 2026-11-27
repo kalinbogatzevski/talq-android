@@ -1,5 +1,7 @@
 package talq.core.call
 
+import talq.core.TalqCore
+import talq.core.typing.clientHello
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocket
@@ -177,6 +179,11 @@ class HpbConnection(
     /** [send] without suspending (the queue is unbounded), so messages leave in the order queued. */
     fun enqueue(text: String) {
         outbox.trySend(text)
+    }
+
+    /** Tells the room's other TalQ apps that this is TalQ Android and its version (after [joinRoom]). */
+    fun announceClient() {
+        enqueue(clientHello(TalqCore.version, settings.helloUserId))
     }
 
     /** Ends the session. [sayBye] tells the server it is over (else it would wait for a resume). */

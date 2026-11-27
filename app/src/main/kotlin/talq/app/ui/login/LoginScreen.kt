@@ -1,5 +1,9 @@
 package talq.app.ui.login
 
+import android.widget.Toast
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -60,6 +64,38 @@ fun LoginScreen() {
     // What the sign-out before could not do.
     val note by container.signOutNote.collectAsStateWithLifecycle()
     val appName = appName()
+    // Organisation mode (0.11.0): its logo, name, welcome line and fixed server; never in a branded build.
+    val organisation by container.organisation.state.collectAsStateWithLifecycle()
+    val org = organisation.takeIf { !Brand.isBranded }
+    val orgLogo = org?.let { rememberOrgLogo(it.logo, it.issued) }
+    // A refreshed brand file with other addresses: shown here (signed out) and taken only by a tap.
+    val addressChange by container.organisation.addressChange.collectAsStateWithLifecycle()
+    // The code sheet: its model (open flag included) is not saved state, so a typed code never outlives
+    // the process, while turning the phone keeps the sheet open.
+    val codeModel: OrgCodeModel = viewModel(key = "org-code") { OrgCodeModel(container.organisation) }
+    val pendingCode by container.organisation.pendingCode.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingCode) {
+        val code = pendingCode ?: return@LaunchedEffect
+        container.organisation.pendingCode.value = null
+        if (Brand.isBranded) return@LaunchedEffect
+        if (container.organisation.state.value != null) {
+            Toast.makeText(context, "Use without an organisation first", Toast.LENGTH_SHORT).show()
+        } else {
+            codeModel.open = true
+            codeModel.start(code)
+        }
+    }
+    if (codeModel.open) {
+        OrganisationCodeSheet(
+            model = codeModel,
+            onDismiss = { codeModel.reset() },
+            onUse = { card ->
+                // A sign-in on another server must not finish under the organisation.
+                model.cancel()
+                codeModel.use(card)
+            },
+        )
+    }
 
     LaunchedEffect(state.browserUrl) {
         val url = state.browserUrl ?: return@LaunchedEffect
@@ -87,12 +123,21 @@ fun LoginScreen() {
                         contentScale = ContentScale.Fit,
                     )
                     Spacer(Modifier.height(20.dp))
+                } else if (orgLogo != null) {
+                    Image(
+                        orgLogo,
+                        contentDescription = null,
+                        modifier = Modifier.heightIn(max = 72.dp).widthIn(max = 220.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                    Spacer(Modifier.height(20.dp))
                 }
-                Text(appName, style = MaterialTheme.typography.displaySmall)
+                Text(org?.name ?: appName, style = MaterialTheme.typography.displaySmall)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (Brand.isBranded) "Sign in to open your conversations."
-                    else "Sign in to your Nextcloud server to open your conversations.",
+                    org?.welcome
+                        ?: if (Brand.isBranded || org != null) "Sign in to open your conversations."
+                        else "Sign in to your Nextcloud server to open your conversations.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -102,7 +147,33 @@ fun LoginScreen() {
                 }
                 Spacer(Modifier.height(28.dp))
                 // A branded build signs in to its built-in server: no field to edit or select.
-                if (Brand.isBranded) {
+                if (Brand.isBranded || org != null) {
+                    // The organisation's server, fixed: shown, not editable.
+                    org?.let {
+                        Text(
+                            "Server: " + it.server.removePrefix("https://"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TalqTheme.colors.textMuted,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    addressChange?.takeIf { org != null }?.let { change ->
+                        Text(
+                            if (change.oldServer == change.newServer) {
+                                "The organisation's ERP address changed: " + (change.oldErp?.removePrefix("https://") ?: "none") +
+                                    " → " + (change.newErp?.removePrefix("https://") ?: "none")
+                            } else {
+                                "The organisation moved: " + change.oldServer.removePrefix("https://") + " → " +
+                                    change.newServer.removePrefix("https://")
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TalqTheme.colors.amber,
+                        )
+                        TextButton(onClick = { container.organisation.acceptAddressChange() }, enabled = !state.busy) {
+                            Text("Use the new address")
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
                     state.error?.let { message ->
                         Text(message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                     }
@@ -153,6 +224,17 @@ fun LoginScreen() {
                     }
                 } else {
                     Button(onClick = model::login, modifier = Modifier.fillMaxWidth()) { Text("Log in") }
+                    if (!Brand.isBranded) {
+                        if (org == null) {
+                            TextButton(onClick = { codeModel.open = true }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Use with an organisation")
+                            }
+                        } else {
+                            TextButton(onClick = { container.organisation.leave() }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Use without an organisation", color = TalqTheme.colors.textSecondary)
+                            }
+                        }
+                    }
                     Spacer(Modifier.height(12.dp))
                     Text(
                         "Your browser opens for the sign-in. $appName never sees your password; " +

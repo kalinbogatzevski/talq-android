@@ -1,5 +1,7 @@
 package talq.app.call
 
+import talq.core.typing.clientHelloStatus
+import talq.app.BuildConfig
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
@@ -335,6 +337,14 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
             cameraApply?.cancel(false)
             cameraApply = worker.schedule({ applyCamera() }, CAMERA_COALESCE_MS, TimeUnit.MILLISECONDS)
         }
+    }
+
+    /** "TalQ Android" and the version, on the status channel: TalQ for desktop shows it beside the name. */
+    private fun sendHello() {
+        val channel = pubChannel ?: return
+        if (channel.state() != DataChannel.State.OPEN) return
+        val bytes = clientHelloStatus(BuildConfig.VERSION_NAME).encodeToByteArray()
+        channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
     }
 
     override fun sendStatus(type: String) {
@@ -689,10 +699,17 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
             if (peer == null) {
                 _publisher.value = c
                 // The video section carries something at once, even with the camera off.
-                if (c == MediaConnection.Connected) onWorker { if (!cameraWanted) startBlack() }
+                if (c == MediaConnection.Connected) onWorker {
+                    if (!cameraWanted) startBlack()
+                    sendHello()
+                }
             } else {
                 _subscriber.value = c
-                if (c == MediaConnection.Connected) onWorker { startStats() }
+                // Again once the other side's stream is up: it may have missed the first one (desktop does the same).
+                if (c == MediaConnection.Connected) onWorker {
+                    startStats()
+                    sendHello()
+                }
             }
         }
 

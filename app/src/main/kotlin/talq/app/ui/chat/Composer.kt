@@ -418,27 +418,27 @@ fun Composer(
                             }
                         },
                         strokeWidth = 2.dp,
-                        color = if (busy || preparing) colors.textMuted else colors.controlInk,
+                        color = if (busy || preparing) colors.textMuted else colors.onAccent,
                     )
                 } else if (editing != null && !micMode) {
                     Icon(
                         Icons.Filled.Check,
                         contentDescription = "Save",
-                        tint = if (canSend) colors.controlInk else colors.textMuted,
+                        tint = if (canSend) colors.onAccent else colors.textMuted,
                         modifier = Modifier.size(20.dp),
                     )
                 } else if (micMode) {
                     Icon(
                         if (recording != null) Icons.AutoMirrored.Filled.Send else Icons.Filled.Mic,
                         contentDescription = if (recording != null) "Send voice message" else "Record a voice message",
-                        tint = colors.controlInk,
+                        tint = colors.onAccent,
                         modifier = Modifier.size(20.dp),
                     )
                 } else {
                     Icon(
                         if (sentSilently) Icons.Outlined.NotificationsOff else Icons.AutoMirrored.Filled.Send,
                         contentDescription = if (sentSilently) "Sent silently" else "Send",
-                        tint = if (canSend) colors.controlInk else colors.textMuted,
+                        tint = if (canSend) colors.onAccent else colors.textMuted,
                         modifier = Modifier.size(20.dp),
                     )
                 }

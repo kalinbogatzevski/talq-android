@@ -226,9 +226,9 @@ fun VoiceCard(file: RichObject, voiceMessage: Boolean, onLongPress: () -> Unit, 
         } else Box(Modifier.size(38.dp).clip(CircleShape).background(colors.accent), contentAlignment = Alignment.Center) {
             when {
                 state != null && state.loading && !state.playing ->
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = colors.controlInk)
-                state?.playing == true -> Icon(Icons.Filled.Pause, contentDescription = "Pause", tint = colors.controlInk)
-                else -> Icon(Icons.Filled.PlayArrow, contentDescription = "Play", tint = colors.controlInk)
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = colors.onAccent)
+                state?.playing == true -> Icon(Icons.Filled.Pause, contentDescription = "Pause", tint = colors.onAccent)
+                else -> Icon(Icons.Filled.PlayArrow, contentDescription = "Play", tint = colors.onAccent)
             }
         }
         Spacer(Modifier.width(10.dp))

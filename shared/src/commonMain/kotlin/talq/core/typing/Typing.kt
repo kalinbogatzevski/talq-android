@@ -59,6 +59,35 @@ fun Room.typingPossible(capabilities: TalkCapabilities, nowSeconds: Long): Boole
         (isModerator || participantType == MEMBER) &&
         takesPosts(capabilities, nowSeconds)
 
+/** What other TalQ apps show for this one: "TalQ Android" and its version. */
+const val TALQ_ANDROID: String = "TalQ Android"
+
+/**
+ * "This is TalQ Android, version [version]", to everyone in the room. TalQ for desktop sends the same
+ * with "TalQ" (`SignalingClient::sendTalqClientHello`), keeps the last one per user and shows it beside
+ * the name ("· TalQ Android/0.11.0") and in a one-to-one header. [userId] is in the message itself: the
+ * signaling server's sender note is not always there.
+ */
+fun clientHello(version: String, userId: String): String = buildJsonObject {
+    put("type", "message")
+    putJsonObject("message") {
+        putJsonObject("recipient") { put("type", "room") }
+        putJsonObject("data") {
+            put("type", "talq.client")
+            put("client", TALQ_ANDROID)
+            put("version", version)
+            put("userid", userId)
+        }
+    }
+}.toString()
+
+/** The same hello on a call's "status" data channel (desktop: `CallManager`, after a subscriber is up). */
+fun clientHelloStatus(version: String): String = buildJsonObject {
+    put("type", "talq.client")
+    put("client", TALQ_ANDROID)
+    put("version", version)
+}.toString()
+
 /** "I am typing" / "I stopped", to everyone in the room (TalQ for desktop's `sendRoomMessage`). */
 fun typingMessage(started: Boolean): String = buildJsonObject {
     put("type", "message")

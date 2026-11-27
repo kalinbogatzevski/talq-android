@@ -1,5 +1,7 @@
 package talq.app.nav
 
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.EnterTransition
@@ -39,6 +41,7 @@ import talq.app.MainActivity
 import talq.app.SessionState
 import talq.app.push.NotificationPermissionPrompt
 import talq.app.ui.adaptive.LocalTwoPane
+import talq.app.ui.login.OrgLinkHost
 import talq.app.ui.adaptive.TwoPane
 import talq.app.ui.chat.LocalAttachPickers
 import talq.app.ui.chat.rememberAttachPickers
@@ -84,14 +87,25 @@ fun TalqRoot(container: AppContainer) {
             }
             // Android 13+: asks once, after sign-in, whether notifications may be shown.
             if (current is SessionState.SignedIn) NotificationPermissionPrompt()
+            // A talq://organisation link while signed in (the login screen takes it while signed out).
+            if (current is SessionState.SignedIn) OrgLinkHost(container, current.session)
         }
-        current is SessionState.Unreachable -> UnreachableScreen(
-            error = current.error,
-            loggingOut = loggingOut,
-            onRetry = { container.restore() },
-            // On the container's scope: turning the phone must not cancel the sign-out.
-            onLogout = { container.scope.launch { container.logout() } },
-        )
+        current is SessionState.Unreachable -> {
+            val code by container.organisation.pendingCode.collectAsStateWithLifecycle()
+            val context = LocalContext.current
+            LaunchedEffect(code) {
+                if (code == null) return@LaunchedEffect
+                container.organisation.pendingCode.value = null
+                Toast.makeText(context, "Open the organisation's link again once you are connected", Toast.LENGTH_LONG).show()
+            }
+            UnreachableScreen(
+                error = current.error,
+                loggingOut = loggingOut,
+                onRetry = { container.restore() },
+                // On the container's scope: turning the phone must not cancel the sign-out.
+                onLogout = { container.scope.launch { container.logout() } },
+            )
+        }
         else -> LoadingScreen()
     }
     // The network coming back and the app coming to the front check at once; nothing else would while the

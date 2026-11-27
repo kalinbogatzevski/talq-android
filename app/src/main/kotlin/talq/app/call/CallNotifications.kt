@@ -34,7 +34,6 @@ object CallNotifications {
     const val ONGOING_ID = 0x7a20
     const val RING_ID = 0x7a21
     private const val CHANNEL_ONGOING = "call_ongoing"
-    private const val ACCENT = 0xFF21E3C8.toInt()
     private const val DECLINE_COLOR = 0xFFE5484D.toInt()
 
     /** Idempotent. The missed-calls channel is the old "calls" one (its sound stays the user's). */
@@ -85,7 +84,7 @@ object CallNotifications {
         val decline = CallActionReceiver.decline(context, ring.nid, ring.token)
         val n = NotificationCompat.Builder(context, context.appContainer.sounds.ringChannel)
             .setSmallIcon(R.drawable.ic_stat_talq)
-            .setColor(ACCENT)
+            .setColor(TalqNotifications.accentColor(context))
             .setContentTitle(ring.callerName)
             .setContentText("Incoming call")
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -120,7 +119,7 @@ object CallNotifications {
         )
         val b = NotificationCompat.Builder(context, CHANNEL_ONGOING)
             .setSmallIcon(R.drawable.ic_stat_talq)
-            .setColor(ACCENT)
+            .setColor(TalqNotifications.accentColor(context))
             .setContentTitle(peerName)
             .setContentText(if (activeSince == null) "Connecting…" else "In a call")
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -144,7 +143,7 @@ object CallNotifications {
     fun ended(context: Context): Notification =
         NotificationCompat.Builder(context, CHANNEL_ONGOING)
             .setSmallIcon(R.drawable.ic_stat_talq)
-            .setColor(ACCENT)
+            .setColor(TalqNotifications.accentColor(context))
             .setContentTitle("Call ended")
             .setSilent(true)
             .build()
@@ -165,7 +164,7 @@ object CallNotifications {
         )
         val b = NotificationCompat.Builder(context, TalqNotifications.channelId(context, NotificationKind.Call))
             .setSmallIcon(R.drawable.ic_stat_talq)
-            .setColor(ACCENT)
+            .setColor(TalqNotifications.accentColor(context))
             .setContentTitle(callerName)
             .setContentText(if (busy) "Called you while you were in another call" else "Missed call")
             .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
@@ -198,7 +197,7 @@ object CallNotifications {
         )
         val n = NotificationCompat.Builder(context, TalqNotifications.channelId(context, NotificationKind.Call))
             .setSmallIcon(R.drawable.ic_stat_talq)
-            .setColor(ACCENT)
+            .setColor(TalqNotifications.accentColor(context))
             .setContentTitle(roomName.ifBlank { "A conversation" })
             .setContentText("A group call started (group calls are not in this version yet)")
             .setCategory(NotificationCompat.CATEGORY_CALL)

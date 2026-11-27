@@ -150,6 +150,7 @@ class TypingServer(credentials: Credentials, private val log: (String) -> Unit =
                 is Entry.In -> {
                     onJoining()
                     c.joinRoom(token, entry.session)
+                    c.announceClient()
                 }
             }
             // Once the answer is old this stay ends instead: the one after it asks again.

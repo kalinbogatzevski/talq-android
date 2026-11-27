@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 import talq.app.AppContainer
 import talq.app.Brand
 import talq.app.BuildConfig
+import talq.app.fixedErp
 import talq.app.SessionState
 import talq.app.call.TurnProbe
 import talq.app.push.AlertState
@@ -100,6 +101,10 @@ class Diagnostics(private val context: Context, private val container: AppContai
             Check(APP, "${Build.MANUFACTURER} ${Build.MODEL}", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})", Health.Info),
             googleServicesCheck(),
             containerCheck(),
+            // Organisation mode: whether one is set and its random brand id; never its code or file.
+            container.organisation.state.value.let { org ->
+                Check(APP, "Organisation", if (org == null) "no" else "yes (${org.brandId})", Health.Info)
+            },
         )
     }
 
@@ -250,7 +255,7 @@ class Diagnostics(private val context: Context, private val container: AppContai
             is ErpLink.Paired -> Check(SHIFT, "Shift status", "Paired as ${link.displayName}$answered", Health.Good)
             is ErpLink.Pairing -> Check(SHIFT, "Shift status", "Pairing…", Health.Running)
             ErpLink.Rejected -> Check(SHIFT, "Shift status", "The ERP no longer accepts this phone: pair it again", Health.Bad)
-            ErpLink.NotPaired -> if (Brand.isBranded) Check(SHIFT, "Shift status", "Not paired", Health.Warn) else null
+            ErpLink.NotPaired -> if (container.fixedErp != null) Check(SHIFT, "Shift status", "Not paired", Health.Warn) else null
         }
     }
 

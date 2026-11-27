@@ -40,12 +40,18 @@ import java.io.File
  * folders" ([AppearanceStore.showFolders]) is per device and never synced. Collapsing a folder is a
  * change of the folders like any other: it is saved, and synced when sync is on.
  */
-class FolderController(context: Context, private val scope: CoroutineScope, private val appearance: AppearanceStore) {
+class FolderController(
+    context: Context,
+    private val scope: CoroutineScope,
+    private val appearance: AppearanceStore,
+    /** Organisation mode: folder sync starts on (see [FolderSyncController]). */
+    syncOnByDefault: () -> Boolean = { false },
+) {
 
     val store = FolderStore(File(context.applicationContext.filesDir, "folders"))
 
     /** The opt-in sync of the attached account (Settings reads [FolderSyncController.status]). */
-    val sync = FolderSyncController(context, scope, store)
+    val sync = FolderSyncController(context, scope, store, syncOnByDefault)
 
     /** The attached account's folders; the EMPTY state while nobody is signed in. */
     val state: StateFlow<FolderState> = store.state

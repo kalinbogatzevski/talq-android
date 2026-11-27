@@ -1,5 +1,8 @@
 package talq.app.ui.settings
 
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import talq.app.ui.login.rememberOrgLogo
 import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -322,6 +325,49 @@ fun SettingsScreen(
             Divider()
             SectionLabel("About")
             SettingRow("$appName for Android", BuildConfig.VERSION_NAME)
+            // Google Play asks for the privacy policy inside the app too, not only on the store page.
+            Column(
+                Modifier.fillMaxWidth()
+                    .clickable(onClickLabel = "Open the privacy policy") { openApprovalPage(context, PRIVACY_URL) }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                Text("Privacy", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "What the app keeps, what it sends where, and what signing out deletes.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textMuted,
+                )
+            }
+            // Organisation mode: which organisation this phone is set up for, with its logo.
+            val aboutOrg by context.appContainer.organisation.state.collectAsStateWithLifecycle()
+            aboutOrg?.takeIf { !Brand.isBranded }?.let { org ->
+                val logo = rememberOrgLogo(org.logo, org.issued)
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    logo?.let {
+                        Image(it, contentDescription = null, modifier = Modifier.size(32.dp), contentScale = ContentScale.Fit)
+                        Spacer(Modifier.width(12.dp))
+                    }
+                    Column {
+                        Text("Organisation", style = MaterialTheme.typography.bodyLarge)
+                        Text(org.name, style = MaterialTheme.typography.bodyMedium, color = colors.textSecondary)
+                    }
+                }
+                // A refreshed brand file with another server waits for the next sign-in.
+                val moved by context.appContainer.organisation.addressChange.collectAsStateWithLifecycle()
+                moved?.let { change ->
+                    Text(
+                        if (change.oldServer == change.newServer) {
+                            "The organisation's ERP address changed. Sign out and tap \"Use the new address\" to take it."
+                        } else {
+                            "The organisation moved to " + change.newServer.removePrefix("https://") +
+                                ". Sign out and tap \"Use the new address\" to take it."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.amber,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+            }
             val updates = context.appContainer.updates
             if (updates.enabled) {
                 val update by updates.state.collectAsStateWithLifecycle()
@@ -397,6 +443,9 @@ private fun ShiftSection(shift: ShiftStatusService) {
     val link by shift.link.collectAsStateWithLifecycle()
     val notice by shift.notice.collectAsStateWithLifecycle()
     val address by shift.address.collectAsStateWithLifecycle()
+    // An ERP the app was given (branded build, organisation mode) has no field to type it in.
+    val organisation by context.appContainer.organisation.state.collectAsStateWithLifecycle()
+    val erpGiven = Brand.isBranded || organisation?.erp != null
     fun open(target: ApproveTarget) {
         if (openApprovalPage(context, target.url)) shift.approveOpened()
         else shift.cancelPairing("No browser could be opened for the approval page.")
@@ -419,7 +468,7 @@ private fun ShiftSection(shift: ShiftStatusService) {
                     "ERP", "Not paired",
                     detail = "Shows colleagues' shift status. You approve this phone once, in your browser.",
                 )
-                if (!Brand.isBranded) {
+                if (!erpGiven) {
                     OutlinedTextField(
                         value = address,
                         onValueChange = shift::setAddress,
@@ -475,8 +524,12 @@ private fun ShiftSection(shift: ShiftStatusService) {
 /** The theme: the four of desktop TalQ, or following the phone's light/dark setting. */
 @Composable
 private fun AppearanceSection() {
-    val appearance = LocalContext.current.appContainer.appearance
-    val theme by appearance.theme.collectAsStateWithLifecycle()
+    val container = LocalContext.current.appContainer
+    val appearance = container.appearance
+    // What is on screen: the person's pick, else the organisation's default theme, else following the phone.
+    val picked by appearance.picked.collectAsStateWithLifecycle()
+    val organisation by container.organisation.state.collectAsStateWithLifecycle()
+    val theme = picked ?: ThemeChoice.fromId(organisation?.theme.takeIf { !Brand.isBranded })
     var choosing by remember { mutableStateOf(false) }
     SettingRow(title = "Theme", value = theme.label, detail = theme.description)
     Row(Modifier.padding(horizontal = 8.dp)) {
@@ -551,6 +604,9 @@ private fun openApprovalPage(context: Context, url: String): Boolean {
         false
     }
 }
+
+/** The privacy policy: the public PRIVACY.md of this app. */
+private const val PRIVACY_URL = "https://github.com/kalinbogatzevski/talq-android/blob/main/PRIVACY.md"
 
 private enum class Tone { Good, Bad, Neutral }
 

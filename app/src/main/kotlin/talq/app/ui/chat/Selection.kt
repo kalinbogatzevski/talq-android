@@ -242,7 +242,7 @@ fun SelectMark(selectable: Boolean, selected: Boolean, size: Dp = 22.dp) {
         if (!selectable) return@Box
         if (selected) {
             Box(Modifier.size(size).clip(CircleShape).background(colors.accent), contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.Check, contentDescription = null, tint = colors.controlInk, modifier = Modifier.size(size * 0.7f))
+                Icon(Icons.Filled.Check, contentDescription = null, tint = colors.onAccent, modifier = Modifier.size(size * 0.7f))
             }
         } else {
             Box(Modifier.size(size).clip(CircleShape).background(colors.bgSecondary).border(1.5.dp, colors.textMuted, CircleShape))

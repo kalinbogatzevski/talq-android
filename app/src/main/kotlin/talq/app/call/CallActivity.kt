@@ -15,6 +15,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import talq.app.data.ThemeChoice
 import talq.app.theme.TalqTheme
+import talq.app.theme.TalqAppTheme
+import talq.app.appContainer
 import talq.app.theme.ThemedSystemBars
 import talq.app.ui.call.CallRoot
 
@@ -48,7 +50,7 @@ class CallActivity : ComponentActivity() {
         // A recreated screen (its old intent replayed) never places or answers a call again.
         accept(if (savedInstanceState == null) parse(intent) else Request.Show)
         setContent {
-            TalqTheme(ThemeChoice.Vivid) {
+            TalqAppTheme(appContainer, fixed = ThemeChoice.Vivid) {
                 ThemedSystemBars(this, light = false)
                 CallRoot(request.value, onRequest = { request.value = it }, onDone = { finish() })
             }

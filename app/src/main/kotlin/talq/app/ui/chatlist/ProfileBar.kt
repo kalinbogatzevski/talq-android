@@ -1,5 +1,14 @@
 package talq.app.ui.chatlist
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import talq.app.Brand
+import talq.app.appContainer
+import talq.app.ui.login.rememberOrgLogo
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,6 +57,10 @@ fun ProfileBar(
     actions: @Composable RowScope.() -> Unit,
 ) {
     val name = session.user.displayName.ifEmpty { session.user.userId }
+    // Organisation mode: the organisation's logo, small, before the bar's buttons (not a button itself).
+    val organisation by LocalContext.current.appContainer.organisation.state.collectAsStateWithLifecycle()
+    val org = organisation.takeIf { !Brand.isBranded }
+    val orgLogo = org?.let { rememberOrgLogo(it.logo, it.issued) }
     // Two lines at a large font size must not be cut by the bar's fixed height.
     val barHeight = with(LocalDensity.current) { (24 + 16).sp.toDp() + 16.dp }
         .coerceAtLeast(TopAppBarDefaults.TopAppBarExpandedHeight)
@@ -96,6 +109,12 @@ fun ProfileBar(
                 }
             }
         },
-        actions = actions,
+        actions = {
+            if (org != null && orgLogo != null) {
+                Image(orgLogo, contentDescription = org.name, modifier = Modifier.size(24.dp), contentScale = ContentScale.Fit)
+                Spacer(Modifier.width(8.dp))
+            }
+            actions()
+        },
     )
 }

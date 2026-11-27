@@ -22,6 +22,17 @@ object Brand {
     fun appName(context: Context): String = context.getString(R.string.app_name)
 }
 
+/**
+ * The server a sign-in must use: built in (branded build) or the organisation's (organisation mode,
+ * 0.11.0); null = the person types one. Read it again each time: the organisation can change.
+ */
+val AppContainer.fixedServer: String?
+    get() = if (Brand.isBranded) Brand.serverUrl else organisation.state.value?.server
+
+/** The ERP address in force without typing: built in, or the organisation's; null = the person types one. */
+val AppContainer.fixedErp: String?
+    get() = if (Brand.isBranded) Brand.erpBaseUrl else organisation.state.value?.erp
+
 /** The product name inside a composable. */
 @Composable
 fun appName(): String = stringResource(R.string.app_name)

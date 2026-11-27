@@ -71,6 +71,8 @@ sealed interface ErpLink {
 class ShiftStatusService(
     context: Context,
     private val scope: CoroutineScope,
+    /** The ERP address that needs no typing (branded build, organisation mode), read each time; null = typed. */
+    private val fixedErp: () -> String?,
     /** Bring the app back over the browser once the approval has arrived. */
     private val bringToFront: () -> Unit,
 ) {
@@ -121,8 +123,8 @@ class ShiftStatusService(
     private var tick: Job? = null
     private var pairJob: Job? = null
 
-    /** The ERP address in force: built in (branded) or typed (generic). Null = unusable, nothing is sent. */
-    private fun currentBase(): ErpBase? = ErpBase.parse(if (Brand.isBranded) Brand.erpBaseUrl else _address.value)
+    /** The ERP address in force: built in or the organisation's, else typed. Null = unusable, nothing is sent. */
+    private fun currentBase(): ErpBase? = ErpBase.parse(fixedErp() ?: _address.value)
 
     // ---------------------------------------------------------------- account
 
@@ -298,7 +300,7 @@ class ShiftStatusService(
     /** The generic build's "ERP address" field. Only while not paired: a key never moves to another address. */
     fun setAddress(text: String) {
         val account = account ?: return
-        if (Brand.isBranded || _link.value != ErpLink.NotPaired) return
+        if (fixedErp() != null || _link.value != ErpLink.NotPaired) return
         val clean = text.filter { it.code >= 0x20 }.take(MAX_ADDRESS_CHARS)
         _address.value = clean
         _notice.value = null
@@ -331,7 +333,7 @@ class ShiftStatusService(
         val base = currentBase()
         if (base == null) {
             _notice.value =
-                if (Brand.isBranded) "This build has no usable ERP address."
+                if (fixedErp() != null) "The ERP address is not usable."
                 else "Enter the ERP address first. It must start with https://"
             return
         }

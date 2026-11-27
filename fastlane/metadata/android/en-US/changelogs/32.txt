@@ -1,0 +1,1 @@
+0.11.0: Use with an organisation: an invite code sets the server, the ERP address and the organisation's name, logo, colour and theme. Codes cannot be guessed or forged. A link opens the organisation's card. TalQ for desktop shows that you use TalQ Android. Folder sync starts on for organisations. Settings > About > Privacy.

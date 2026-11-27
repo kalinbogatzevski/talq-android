@@ -10,14 +10,19 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import talq.app.AppContainer
 import talq.app.Brand
 import talq.app.CredentialStorageException
+import talq.app.fixedServer
 import talq.core.TalkClient
 import talq.core.TalkError
 import talq.core.auth.LoginFlow
+import talq.core.org.orgFlowAllowed
+import talq.core.org.sameServer
 
 enum class LoginPhase {
     /** Waiting for the user to type an address. */
@@ -52,22 +57,29 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
     private var loginUrl: String? = null
 
     init {
-        // A branded build signs in to its organisation's server only: there is no address to type
-        // or pick, and the remembered one is not read.
+        // A branded build, and the public app with an organisation (0.11.0), sign in to that server
+        // only: there is no address to type or pick, and the remembered one is not read. Leaving the
+        // organisation brings the remembered address back.
         if (Brand.isBranded) _state.update { it.copy(serverUrl = Brand.serverUrl) } else viewModelScope.launch {
-            val last = try {
-                container.credentialStore.lastServerUrl()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                ""
+            container.organisation.state.map { it?.server }.distinctUntilChanged().collect { orgServer ->
+                if (orgServer != null) {
+                    _state.update { it.copy(serverUrl = orgServer, error = null) }
+                } else {
+                    val last = try {
+                        container.credentialStore.lastServerUrl()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ""
+                    }
+                    _state.update { it.copy(serverUrl = last, error = null) }
+                }
             }
-            _state.update { if (it.serverUrl.isEmpty()) it.copy(serverUrl = last) else it }
         }
     }
 
     fun onServerUrlChange(value: String) {
-        if (Brand.isBranded) return
+        if (container.fixedServer != null) return
         _state.update { it.copy(serverUrl = value, error = null) }
     }
 
@@ -94,13 +106,17 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
 
     fun login() {
         if (_state.value.busy) return
-        val url = normalize(if (Brand.isBranded) Brand.serverUrl else _state.value.serverUrl)
+        val fixed = container.fixedServer
+        // In organisation mode every address of the sign-in must stay on this server (see signIn).
+        val orgServer = if (Brand.isBranded) null else container.organisation.state.value?.server
+        val url = normalize(fixed ?: _state.value.serverUrl)
         if (url == null) {
             val empty = _state.value.serverUrl.isBlank()
             _state.update {
                 it.copy(
                     error = when {
                         Brand.isBranded -> "This app has no valid server address built in."
+                        fixed != null -> "The organisation's server address is not valid."
                         empty -> "Enter the address of your Nextcloud server."
                         else -> "That isn't a valid server address."
                     },
@@ -110,7 +126,7 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
         }
         _state.update { it.copy(serverUrl = url, phase = LoginPhase.Contacting, error = null) }
         job = viewModelScope.launch {
-            if (!Brand.isBranded) {
+            if (fixed == null) {
                 try {
                     container.credentialStore.rememberServerUrl(url)
                 } catch (e: CancellationException) {
@@ -122,19 +138,28 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
             // The server lists the app password under this name ("Devices & sessions").
             val flow = LoginFlow(url, deviceName = "$appName for Android")
             try {
-                signIn(flow)
+                signIn(flow, fixed != null, orgServer)
             } finally {
                 flow.close()
             }
         }
     }
 
-    private suspend fun signIn(flow: LoginFlow) {
+    /**
+     * [fixedServer]: the session keeps the server the sign-in started on, whatever the answer says.
+     * [orgServer]: organisation mode; the browser page, the poll address and the answered server must
+     * all be that server, or the sign-in stops before the person types a password anywhere else.
+     */
+    private suspend fun signIn(flow: LoginFlow, fixedServer: Boolean, orgServer: String?) {
         run {
             val session = try {
                 flow.start()
             } catch (e: TalkError) {
                 fail(startError(e))
+                return
+            }
+            if (orgServer != null && !orgFlowAllowed(orgServer, session.loginUrl, session.pollEndpoint)) {
+                fail(NOT_THE_ORGANISATION)
                 return
             }
             loginUrl = session.loginUrl
@@ -149,9 +174,19 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
                 )
                 return
             }
+            if (orgServer != null && !sameServer(answered.server, orgServer)) {
+                fail(NOT_THE_ORGANISATION, browserOnTop = true)
+                return
+            }
             // The server names its own canonical address in the answer, and the generic app
-            // follows it. A branded build stays on its built-in server whatever the answer says.
-            val credentials = if (Brand.isBranded) answered.copy(server = flow.serverUrl) else answered
+            // follows it. A fixed server (branded build, organisation) stays whatever the answer says.
+            val credentials = if (fixedServer) answered.copy(server = flow.serverUrl) else answered
+            // An organisation applied while this sign-in ran (a link, the transfer): its server only.
+            val orgNow = if (Brand.isBranded) null else container.organisation.state.value?.server
+            if (orgNow != null && !sameServer(orgNow, flow.serverUrl)) {
+                fail(NOT_THE_ORGANISATION, browserOnTop = true)
+                return
+            }
             _state.update { it.copy(phase = LoginPhase.Finishing, browserUrl = null) }
             try {
                 container.signIn(credentials)
@@ -181,7 +216,7 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
         if (browserOnTop) container.bringToFront()
     }
 
-    private fun startError(e: TalkError): String = if (Brand.isBranded) brandedStartError(e) else when (e) {
+    private fun startError(e: TalkError): String = if (container.fixedServer != null) brandedStartError(e) else when (e) {
         is TalkError.Network -> when (e.cause) {
             is UnknownHostException -> "Can't find that server. Check the address and your connection."
             is SSLException -> "Couldn't make a secure connection to that server."
@@ -217,3 +252,6 @@ class LoginViewModel(private val container: AppContainer, private val appName: S
         }
     }
 }
+
+/** Organisation mode: the server sent the sign-in somewhere other than the organisation's server. */
+const val NOT_THE_ORGANISATION = "This server does not belong to the organisation"

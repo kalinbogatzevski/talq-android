@@ -49,7 +49,7 @@ data class RichTextColors(
             link = c.link,
             mentionInk = c.accentSoftInk,
             mentionFill = c.accentSoft,
-            selfMentionInk = c.controlInk,
+            selfMentionInk = c.onAccent,
             selfMentionFill = c.accent,
             codeSpan = c.codeSpan,
             codeInk = c.textPrimary,

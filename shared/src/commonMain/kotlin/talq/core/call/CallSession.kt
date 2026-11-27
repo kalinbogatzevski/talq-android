@@ -260,6 +260,7 @@ class CallSession(
             val nc = client.joinRoomSession(token)
             ncSession = nc
             c.joinRoom(token, nc)
+            c.announceClient()
             inbox.send(Input.InRoom(id))
         } catch (e: TalkError) {
             inbox.send(Input.End(CallEndReason.Failed, "setting up failed (${e::class.simpleName})"))
@@ -363,6 +364,7 @@ class CallSession(
                 val nc = client.joinRoomSession(token)
                 ncSession = nc
                 c.joinRoom(token, nc)
+                c.announceClient()
                 inbox.send(Input.ReenteredRoom)
             } catch (e: TalkError) {
                 inbox.send(Input.End(CallEndReason.Failed, "entering the conversation again failed (${e::class.simpleName})"))

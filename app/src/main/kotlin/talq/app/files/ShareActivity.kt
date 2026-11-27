@@ -70,6 +70,7 @@ import talq.app.appName
 import talq.app.nav.DeepLink
 import talq.app.share.ChatShortcuts
 import talq.app.theme.TalqTheme
+import talq.app.theme.TalqAppTheme
 import talq.app.ui.chat.tooLongText
 import talq.app.ui.common.Avatar
 import talq.app.ui.common.LoadingScreen
@@ -100,8 +101,7 @@ class ShareActivity : ComponentActivity() {
         enableEdgeToEdge()
         vm.begin(intent)
         setContent {
-            val theme by appContainer.appearance.theme.collectAsStateWithLifecycle()
-            TalqTheme(theme) {
+            TalqAppTheme(appContainer) {
                 ThemedSystemBars(this, TalqTheme.colors.isLight)
                 ShareScreen(
                     vm = vm,

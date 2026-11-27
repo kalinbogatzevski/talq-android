@@ -26,9 +26,11 @@ kotlin {
         }
         androidMain.dependencies {
             implementation(libs.ktor.client.okhttp)
+            implementation(libs.tink)
         }
         jvmMain.dependencies {
             implementation(libs.ktor.client.okhttp)
+            implementation(libs.tink)
         }
     }
 }
@@ -56,4 +58,37 @@ tasks.register<JavaExec>("folderCheck") {
     dependsOn(main.compileTaskProvider)
     classpath = files(main.output.allOutputs, main.runtimeDependencyFiles)
     mainClass.set("talq.core.smoke.FolderCheck")
+}
+
+// Organisation mode's security core: invite codes, key derivation, brand files, signatures, payload
+// rules, colour rules and the issuing tool, with throwaway keys (offline, nothing kept).
+//   ./gradlew :shared:orgCheck
+tasks.register<JavaExec>("orgCheck") {
+    group = "verification"
+    description = "Check organisation mode's codes, brand files, signatures and colour rules (offline)."
+    val main = kotlin.jvm().compilations.getByName("main")
+    dependsOn(main.compileTaskProvider)
+    classpath = files(main.output.allOutputs, main.runtimeDependencyFiles)
+    mainClass.set("talq.core.smoke.OrgCheck")
+}
+
+// The owner's brand issuing tool (talq.core.org.tool.BrandOps), as a script the owner runs in a
+// plain terminal of his own, so it can ask for the signing key's passphrase without showing it.
+// Never run it in an AI session: it holds the signing key and writes the invite codes.
+//   ./gradlew :shared:brandToolScript   then   shared\build\brandtool\brandtool.cmd <command>
+tasks.register("brandToolScript") {
+    group = "distribution"
+    description = "Write shared/build/brandtool/brandtool.cmd for the owner's brand issuing tool."
+    val main = kotlin.jvm().compilations.getByName("main")
+    dependsOn(main.compileTaskProvider)
+    val script = layout.buildDirectory.file("brandtool/brandtool.cmd")
+    outputs.file(script)
+    doLast {
+        val classpath = files(main.output.allOutputs, main.runtimeDependencyFiles).files.joinToString(";") { it.absolutePath }
+        val java = File(System.getProperty("java.home"), "bin/java.exe").absolutePath
+        script.get().asFile.apply {
+            parentFile.mkdirs()
+            writeText("@echo off\r\n\"$java\" -cp \"$classpath\" talq.core.org.tool.BrandOps %*\r\n")
+        }
+    }
 }

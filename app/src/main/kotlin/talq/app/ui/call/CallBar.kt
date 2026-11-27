@@ -41,12 +41,12 @@ fun CallInProgressBar() {
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.PhoneInTalk, contentDescription = null, tint = colors.controlInk)
+        Icon(Icons.Filled.PhoneInTalk, contentDescription = null, tint = colors.onAccent)
         Spacer(Modifier.width(12.dp))
         Text(
             "Call with ${call.peerName} · tap to return",
             style = MaterialTheme.typography.labelLarge,
-            color = colors.controlInk,
+            color = colors.onAccent,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

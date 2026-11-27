@@ -297,7 +297,7 @@ private fun DraftChip(draft: DraftChipState, onSelect: () -> Unit, onDiscard: ((
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val fill = if (draft.failed) colors.danger else colors.accent
-        val ink = if (draft.failed) colors.inkOn(fill) else colors.controlInk
+        val ink = if (draft.failed) colors.inkOn(fill) else colors.onAccent
         Box(Modifier.size(22.dp).clip(CircleShape).background(fill), contentAlignment = Alignment.Center) {
             when {
                 draft.sending -> CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.5.dp, color = ink)

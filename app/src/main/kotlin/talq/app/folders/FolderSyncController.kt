@@ -103,7 +103,13 @@ import kotlin.random.Random
  * sends nothing: a change not yet uploaded is a difference from the base and goes up at the next
  * sign-in. The files stay.
  */
-class FolderSyncController(context: Context, private val scope: CoroutineScope, private val store: FolderStore) {
+class FolderSyncController(
+    context: Context,
+    private val scope: CoroutineScope,
+    private val store: FolderStore,
+    /** Organisation mode: sync starts on for an account whose switch was never set (0.11.0). */
+    private val onByDefault: () -> Boolean = { false },
+) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("folder_sync", Context.MODE_PRIVATE)
     private val timing = FolderSyncTiming()
@@ -251,6 +257,9 @@ class FolderSyncController(context: Context, private val scope: CoroutineScope, 
     private var pause = FolderSyncPause.None
     private var accountNotReady = false
     private var togglePending = false
+
+    /** The switch-on under way is the organisation's default, not the person's: a failure stores nothing. */
+    private var automaticEnable = false
     private var firstAfterEnable = false
     private var lastSyncedMs = 0L
     private var failures = 0
@@ -346,6 +355,9 @@ class FolderSyncController(context: Context, private val scope: CoroutineScope, 
             networkWatch.start()
             setState(FolderSyncState.Idle)
         }
+        // Organisation mode starts with sync on, through the switch's own way on (a probe, then the
+        // switch written once the server is proved); a choice the person made, on or off, stays theirs.
+        if (!enabled && onByDefault() && !prefs.contains("$scopeKey.enabled")) enable(automatic = true)
     }
 
     /** Sign-out, an account switch: stop everything, forget the account. No request, no sidecar write. */
@@ -425,14 +437,21 @@ class FolderSyncController(context: Context, private val scope: CoroutineScope, 
      * when it is refused or cannot be reached. The first cycle then merges: a union with the remote
      * the first time, a trusted three-way merge when a sidecar from an earlier time is still believed.
      */
-    fun enable() {
+    /**
+     * [automatic]: the organisation's default at attach, not a tap. If it fails nothing is written and
+     * no refusal is shown, so the next attach tries again; only the person's own choice is stored.
+     */
+    fun enable(automatic: Boolean = false) {
         if (attached && enabled) return   // already on: no second probe
         refusalText = ""
+        automaticEnable = automatic
         if (!storeIsOurs() || remote == null || !storeWritable()) {
             // The Settings row is disabled in this case; this is the defensive answer.
             Log.w(TAG, "FolderSync: the switch cannot be turned on: this account's folders are not available here")
-            writeEnabled(false)
-            refusalText = enableRefusalText(EnableRefusal.CouldNotReach, appName())
+            if (!automatic) {
+                writeEnabled(false)
+                refusalText = enableRefusalText(EnableRefusal.CouldNotReach, appName())
+            }
             publish()
             return
         }
@@ -844,8 +863,12 @@ class FolderSyncController(context: Context, private val scope: CoroutineScope, 
         )
         logCycleEnd("switch-refused", why.logName)
         turnOff()
-        writeEnabled(false)
-        refusalText = enableRefusalText(why, appName())
+        // The organisation's default tried and failed: stored nowhere, tried again at the next attach.
+        if (!automaticEnable) {
+            writeEnabled(false)
+            refusalText = enableRefusalText(why, appName())
+        }
+        automaticEnable = false
         setState(FolderSyncState.Off)
     }
 

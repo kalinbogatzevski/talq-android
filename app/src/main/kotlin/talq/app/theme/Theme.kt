@@ -25,7 +25,7 @@ private fun TalqColors.toScheme(): ColorScheme {
     val base = if (isLight) lightColorScheme() else darkColorScheme()
     return base.copy(
         primary = accent,
-        onPrimary = controlInk,
+        onPrimary = onAccent,
         primaryContainer = accentSoft,
         onPrimaryContainer = accentSoftInk,
         inversePrimary = accent,
@@ -118,8 +118,9 @@ fun colorsFor(choice: ThemeChoice): TalqColors = when (choice) {
 }
 
 @Composable
-fun TalqTheme(choice: ThemeChoice = ThemeChoice.System, content: @Composable () -> Unit) {
-    val colors = colorsFor(choice)
+fun TalqTheme(choice: ThemeChoice = ThemeChoice.System, brand: Int? = null, content: @Composable () -> Unit) {
+    // An organisation's colour (organisation mode), fitted to this theme; none = the palette as it is.
+    val colors = colorsFor(choice).withBrand(brand)
     CompositionLocalProvider(LocalTalqColors provides colors) {
         MaterialTheme(
             colorScheme = colors.toScheme(),

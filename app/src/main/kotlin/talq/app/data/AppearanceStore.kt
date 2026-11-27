@@ -29,8 +29,17 @@ class AppearanceStore(context: Context) {
     private val _theme = MutableStateFlow(ThemeChoice.fromId(prefs.getString(KEY_THEME, null)))
     val theme: StateFlow<ThemeChoice> = _theme.asStateFlow()
 
+    private val _picked = MutableStateFlow(prefs.getString(KEY_THEME, null)?.let(ThemeChoice::fromId))
+
+    /**
+     * The theme the person picked, or null while they never did: then an organisation's default theme
+     * applies (organisation mode), else following the phone. Never written for them.
+     */
+    val picked: StateFlow<ThemeChoice?> = _picked.asStateFlow()
+
     fun setTheme(choice: ThemeChoice) {
         _theme.value = choice
+        _picked.value = choice
         prefs.edit().putString(KEY_THEME, choice.id).apply()
     }
 

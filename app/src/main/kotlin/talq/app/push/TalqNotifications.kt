@@ -14,6 +14,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.content.LocusIdCompat
+import talq.app.Brand
 import talq.app.appContainer
 import talq.app.MainActivity
 import talq.app.R
@@ -102,6 +103,10 @@ object TalqNotifications {
     private const val GROUP_PREFIX = "talq.room."
     private const val GROUP_OTHER = "talq.other"
     private const val ACCENT = 0xFF21E3C8.toInt()
+
+    /** The notifications' colour: the organisation's (organisation mode), else the app's teal. */
+    fun accentColor(context: Context): Int =
+        context.appContainer.organisation.state.value?.takeIf { !Brand.isBranded }?.let { 0xFF000000.toInt() or it.accent } ?: ACCENT
 
     /** Missed calls; the message channels' ids come from [talq.app.sound.SoundStore]. */
     private const val CHANNEL_CALLS = "calls"
@@ -287,7 +292,7 @@ object TalqNotifications {
         }
         val builder = NotificationCompat.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_stat_talq)
-            .setColor(ACCENT)
+            .setColor(accentColor(context))
             .setContentTitle(conversation)
             .setContentText(if (content.sender.isNotEmpty() && content.isGroup) "${content.sender}: ${content.text}" else content.text)
             .setWhen(content.whenMillis)
@@ -338,7 +343,7 @@ object TalqNotifications {
         val under = items(context).filter { it.notification.group == group && it.id != content.nid.toInt() }
         val summary = NotificationCompat.Builder(context, headerChannel(context, under, channel))
             .setSmallIcon(R.drawable.ic_stat_talq)
-            .setColor(ACCENT)
+            .setColor(accentColor(context))
             .setContentTitle(content.title)
             .setStyle(NotificationCompat.InboxStyle().setSummaryText(content.title))
             .setGroup(group)
