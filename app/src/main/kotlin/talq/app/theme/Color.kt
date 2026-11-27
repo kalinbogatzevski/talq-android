@@ -45,6 +45,12 @@ data class TalqColors(
     val amber: Color,
     val online: Color,
     val danger: Color,
+    /**
+     * The grey fill of a muted count (a muted chat, a topic on "never"), with [inkOn] on it (4.7:1 or
+     * better). It is seen on every ground it is drawn on (1.9:1 or better) and stands apart from the
+     * accent, amber and danger counts by lightness too, not by hue alone (2.1:1 or better).
+     */
+    val mutedFill: Color,
     // Rich text
     val mention: Color,
     val link: Color,
@@ -114,6 +120,7 @@ val VividColors = TalqColors(
     amber = Color(0xFFFFB84A),
     online = Color(0xFF66DD76),
     danger = Color(0xFFFF9163),
+    mutedFill = Color(0xFF746C60),
     mention = Color(0xFF14B8A6),
     link = Color(0xFF62A3D1),
     codeBg = Color(0xFF19120A),
@@ -144,6 +151,7 @@ val EmberColors = TalqColors(
     amber = Color(0xFFF3A948),
     online = Color(0xFF5FCE72),
     danger = Color(0xFFEC8A64),
+    mutedFill = Color(0xFF6E675E),
     mention = Color(0xFF14B8A6),
     link = Color(0xFF62A3D1),
     codeBg = Color(0xFF16110D),
@@ -174,6 +182,7 @@ val WarmColors = TalqColors(
     amber = Color(0xFFF6AD3E),
     online = Color(0xFF61D36F),
     danger = Color(0xFFF08A62),
+    mutedFill = Color(0xFF70695D),
     mention = Color(0xFF14B8A6),
     link = Color(0xFF62A3D1),
     codeBg = Color(0xFF17120C),
@@ -204,6 +213,7 @@ val PaperColors = TalqColors(
     amber = Color(0xFF855615),
     online = Color(0xFF296D33),
     danger = Color(0xFF9E462D),
+    mutedFill = Color(0xFF9F988C),
     mention = Color(0xFF0C6A5F),
     link = Color(0xFF1D5F8A),
     codeBg = Color(0xFFECE2CD),

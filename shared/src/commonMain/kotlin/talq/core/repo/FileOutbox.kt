@@ -4,7 +4,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,6 +22,9 @@ import talq.core.files.FileNames
 import talq.core.model.ChatMessage
 import kotlin.concurrent.Volatile
 
+/** What a [FileToSend.prepare] made: goes up instead of the file itself, under this name. */
+class PreparedFile(val source: ByteSource, val name: String)
+
 /** One file handed to [FileOutbox.send]. */
 class FileToSend(
     /** The bytes. Kept until the file is sent or discarded; a retry opens it again. */
@@ -31,11 +36,22 @@ class FileToSend(
     val tag: String = "",
     /** Send as a voice message (audio/mpeg or audio/wav only). */
     val voiceMessage: Boolean = false,
+    /**
+     * Work on the file before it goes up (a smaller video), when its turn comes: gets the name it has in the
+     * outbox, reports 0..1 and answers what to send instead, or null to send the file as it is. Whatever it
+     * throws, the file does not go: it fails ([FileSendState.Failed.unprepared]) until a retry, which runs this
+     * again, or has the file sent as it is after all ([FileOutbox.retry]). Cancelled when the file is discarded.
+     * A retry after another failure sends what it made and does not run it again, unless that could not be read.
+     */
+    val prepare: (suspend (name: String, onProgress: (Float) -> Unit) -> PreparedFile?)? = null,
 )
 
 sealed interface FileSendState {
     /** Waiting for the files before it (one file goes up at a time per room). */
     data object Queued : FileSendState
+
+    /** [FileToSend.prepare] is at work, [fraction] 0..1. */
+    data class Preparing(val fraction: Float) : FileSendState
 
     data class Uploading(val sent: Long, val total: Long) : FileSendState {
         /** 0..1 */
@@ -45,9 +61,19 @@ sealed interface FileSendState {
     /** The file is on the server and is being posted into the chat. */
     data object Sharing : FileSendState
 
-    /** Stays until [FileOutbox.retry] or [FileOutbox.discard]. */
-    data class Failed(val error: TalkError) : FileSendState
+    /** Stays until [FileOutbox.retry] or [FileOutbox.discard]. [unprepared]: it is [FileToSend.prepare] that failed. */
+    data class Failed(val error: TalkError, val unprepared: Boolean = false) : FileSendState
 }
+
+/** What a discarded file carried for its whole send (see [FileOutbox.discard]). */
+class DiscardedFile(
+    val caption: String,
+    val replyTo: ChatMessage?,
+    /** The message it answers (also when it is not loaded, then [replyTo] is null), 0 for none. */
+    val replyToId: Long,
+    /** The key of the file of the same send that has them now; empty: none has. */
+    val movedTo: String,
+)
 
 /** A file on its way into a chat. Shown as a pending bubble; never dropped silently. */
 data class FileOutboxEntry(
@@ -60,15 +86,19 @@ data class FileOutboxEntry(
     val mimeType: String,
     /** [FileToSend.tag], untouched. */
     val tag: String,
-    /** Only the first file of a send carries the caption. */
+    /** Only the first file of a send carries the caption (the next one once that was discarded). */
     val caption: String,
-    /** Only the first file of a send carries the quote. */
+    /** The same for the quote. */
     val replyTo: ChatMessage?,
     /** Topic the file goes into, 0 for none (General). */
     val threadId: Long,
     /** Not empty: this send starts a new topic of this name (then [threadId] is 0 at first). */
     val threadTitle: String,
     val state: FileSendState,
+    /** Posted without notifying anyone. */
+    val silent: Boolean = false,
+    /** The message it answers, 0 for none: [replyTo] is that one as far as it is loaded. */
+    val replyToId: Long = replyTo?.id ?: 0L,
 ) {
     val failed: Boolean get() = state is FileSendState.Failed
 }
@@ -93,8 +123,14 @@ class FileOutbox internal constructor(
     private val queue = Channel<String>(Channel.UNLIMITED)
     private val pending = MutableStateFlow<Map<String, Pending>>(emptyMap())
 
-    private class Pending(val file: FileToSend, val batch: Batch, val first: Boolean) {
+    private class Pending(val file: FileToSend, val name: String, val batch: Batch, val first: Boolean) {
         @Volatile var job: Job? = null
+
+        /** What goes up (the file itself, or what [FileToSend.prepare] made of it); null until its first turn. */
+        @Volatile var prepared: PreparedFile? = null
+
+        /** The user said so: without [FileToSend.prepare]. */
+        @Volatile var asItIs = false
 
         /** Set once the upload is through, so a retry of a failed post does not upload again. */
         @Volatile var uploaded: UploadedFile? = null
@@ -105,6 +141,9 @@ class FileOutbox internal constructor(
 
     /** What the files of one [send] share: the topic the first of them may be about to create. */
     private class Batch(val topic: CompletableDeferred<Long>)
+
+    /** [FileToSend.prepare] failed with [error]. */
+    private class Unprepared(val error: TalkError) : Exception(error)
 
     /** Pending and failed files, oldest first. Render them after the chat's messages. */
     val entries: StateFlow<List<FileOutboxEntry>> = _entries.asStateFlow()
@@ -140,7 +179,9 @@ class FileOutbox internal constructor(
      * Queue [files] for this room: each becomes its own message, in order. [caption] and
      * [replyTo] go with the first one. [threadId] > 0 files them in that topic, 0 in General.
      * With a [threadTitle] the first file STARTS a topic of that name and the others follow
-     * into it (the quote is dropped then). Returns the outbox keys, one per file.
+     * into it (the quote is dropped then). [silent] goes with every file: nobody is notified
+     * (only where the server has `media-caption`). [replyToId]: the quoted message where only its id is
+     * known (a file from an earlier run of the app). Returns the outbox keys, one per file.
      */
     fun send(
         files: List<FileToSend>,
@@ -148,6 +189,8 @@ class FileOutbox internal constructor(
         threadId: Long = 0,
         replyTo: ChatMessage? = null,
         threadTitle: String = "",
+        silent: Boolean = false,
+        replyToId: Long = replyTo?.id ?: 0L,
     ): List<String> {
         if (files.isEmpty()) return emptyList()
         val title = threadTitle.trim()
@@ -165,17 +208,24 @@ class FileOutbox internal constructor(
                 threadId = thread,
                 threadTitle = title,
                 state = FileSendState.Queued,
+                silent = silent,
+                replyToId = if (i == 0 && title.isEmpty()) replyToId else 0L,
             )
         }
-        pending.update { map -> map + files.indices.associate { i -> keys[i] to Pending(files[i], batch, first = i == 0) } }
+        pending.update { map -> map + files.indices.associate { i -> keys[i] to Pending(files[i], names[i], batch, first = i == 0) } }
         _entries.update { it + created }
         for (key in keys) queue.trySend(key)
+        session.roomActions.wroteIn(token)
         return keys
     }
 
-    /** Try a failed file again. A file that was already uploaded is only posted again. */
-    fun retry(referenceId: String) {
+    /**
+     * Try a failed file again. A file that was already uploaded is only posted again. [asItIs]: the file itself
+     * goes from now on, without its [FileToSend.prepare].
+     */
+    fun retry(referenceId: String, asItIs: Boolean = false) {
         if (_entries.value.none { it.referenceId == referenceId && it.failed }) return
+        if (asItIs) pending.value[referenceId]?.asItIs = true
         setState(referenceId, FileSendState.Queued)
         queue.trySend(referenceId)
     }
@@ -183,11 +233,14 @@ class FileOutbox internal constructor(
     /**
      * Give up on a file: stops its upload (the server-side pieces are removed) and drops the
      * entry. Discarding the file that was to start a topic discards the files waiting for it.
+     * Answers the caption and the quote when it carried any and is not in the chat with them: another
+     * file of its send has them now, or they are the user's again.
      */
-    fun discard(referenceId: String) {
+    fun discard(referenceId: String): DiscardedFile? {
         val p = pending.value[referenceId]
+        val carried = if (p == null) null else handOver(referenceId, p)
         finish(referenceId)
-        if (p == null) return
+        if (p == null) return null
         p.job?.cancel()
         val up = p.uploaded
         session.launch {
@@ -202,6 +255,33 @@ class FileOutbox internal constructor(
         if (p.first && !p.batch.topic.isCompleted) {
             pending.value.filterValues { it.batch === p.batch }.keys.forEach { discard(it) }
         }
+        return carried
+    }
+
+    /**
+     * [key] is being discarded: its caption and quote go to the next file of its send that has not been
+     * uploaded yet. Safe while that one is at work: [run] reads them once its state says Sharing, and none
+     * in that state is given any. Nothing is moved from a file whose post may have gone through unheard (it
+     * could be in the chat twice then), nor within a send whose topic does not exist (all of it goes).
+     */
+    private fun handOver(key: String, p: Pending): DiscardedFile? {
+        var carried: DiscardedFile? = null
+        _entries.update { list ->
+            carried = null
+            val entry = list.firstOrNull { it.referenceId == key }
+            val posted = entry?.state == FileSendState.Sharing && p.uploaded == null
+            if (entry == null || posted || (entry.caption.isEmpty() && entry.replyToId == 0L)) return@update list
+            val next = if (p.uploaded != null || !p.batch.topic.isCompleted) null else list.firstOrNull {
+                val other = pending.value[it.referenceId]
+                it.referenceId != key && it.state != FileSendState.Sharing &&
+                    other != null && other.batch === p.batch && other.uploaded == null
+            }
+            carried = DiscardedFile(entry.caption, entry.replyTo, entry.replyToId, next?.referenceId.orEmpty())
+            if (next == null) list else list.map {
+                if (it.referenceId == next.referenceId) it.copy(caption = entry.caption, replyTo = entry.replyTo, replyToId = entry.replyToId) else it
+            }
+        }
+        return carried
     }
 
     private suspend fun attempt(key: String, p: Pending) {
@@ -209,11 +289,38 @@ class FileOutbox internal constructor(
             run(key, p, if (p.first) 0L else p.batch.topic.await())
         } catch (e: CancellationException) {
             throw e
+        } catch (e: Unprepared) {
+            setState(key, FileSendState.Failed(e.error, unprepared = true))
         } catch (e: TalkError) {
+            // What was made of it may be what cannot be read (the system cleared the cache): a retry starts
+            // from the file itself, and the pieces of the other bytes are no use to it.
+            if (e is TalkError.LocalFile && p.file.prepare != null && p.uploaded == null) {
+                p.prepared = null
+                files.discardResume(p.resume)
+            }
             setState(key, FileSendState.Failed(e))
         } catch (e: Throwable) {
             setState(key, FileSendState.Failed(TalkError.LocalFile(e)))
         }
+    }
+
+    /** The bytes and the name that go up: the file's own, or what its [FileToSend.prepare] made of it. */
+    private suspend fun prepared(key: String, p: Pending): PreparedFile {
+        p.prepared?.let { return it }
+        val made = try {
+            p.file.prepare?.takeUnless { p.asItIs }
+                ?.invoke(p.name) { fraction -> setState(key, FileSendState.Preparing(fraction.coerceIn(0f, 1f))) }
+        } catch (e: Throwable) {
+            // Discarded meanwhile.
+            currentCoroutineContext().ensureActive()
+            throw Unprepared(e as? TalkError ?: TalkError.LocalFile(e))
+        }
+        val ready = made ?: PreparedFile(p.file.source, p.name)
+        p.prepared = ready
+        if (p.file.prepare != null) {
+            _entries.update { list -> list.map { if (it.referenceId == key) it.copy(name = ready.name, size = ready.source.size) else it } }
+        }
+        return ready
     }
 
     private suspend fun run(key: String, p: Pending, batchTopic: Long) {
@@ -237,9 +344,10 @@ class FileOutbox internal constructor(
         }
 
         val uploaded = p.uploaded ?: run {
-            setState(key, FileSendState.Uploading(0, entry.size))
+            val file = prepared(key, p)
+            setState(key, FileSendState.Uploading(0, file.source.size))
             var lastShown = 0L
-            files.upload(token, p.file.source, entry.name, resume = p.resume, onProgress = { sent, total ->
+            files.upload(token, file.source, file.name, resume = p.resume, onProgress = { sent, total ->
                 // Not every 64 KB: a state update per percent is plenty for a progress bar.
                 if (sent == total || sent - lastShown >= maxOf(total / 100, 1L)) {
                     lastShown = sent
@@ -249,16 +357,19 @@ class FileOutbox internal constructor(
         }
 
         setState(key, FileSendState.Sharing)
+        // Read after that: a discarded file of the same send may have left it its caption (see handOver).
+        val now = _entries.value.firstOrNull { it.referenceId == key } ?: return
         var message: ChatMessage? = null
         try {
             files.share(
                 token, uploaded, key,
                 FileShareOptions(
-                    caption = entry.caption,
+                    caption = now.caption,
                     threadId = threadId,
-                    replyTo = entry.replyTo?.id ?: 0L,
+                    replyTo = now.replyToId,
                     threadTitle = if (startsTopic) entry.threadTitle else "",
                     voiceMessage = p.file.voiceMessage,
+                    silent = entry.silent,
                 ),
             )
         } catch (e: TalkError) {

@@ -1,18 +1,45 @@
 TalQ is a native client for Nextcloud Talk, built with Kotlin and Jetpack Compose. It is the Android sibling of TalQ for desktop. Topics (Talk's threads) are first-class: each topic is a tab inside its conversation, with its own place, draft, unread count and notification level.
 
-<b>What it does</b>
+<b>Chat</b>
 <ul>
-<li>Sign in through your browser (Nextcloud Login Flow v2). Only an app password is stored, encrypted with a key held in the Android Keystore, and it is revoked when you sign out (if your server can be reached then).</li>
-<li>Conversations with unread counts, mention markers and presence dots on one-to-one chats.</li>
-<li>Topics as tabs, a "next unread topic" button, new topics, and a notification level per topic.</li>
-<li>Messages with formatting, mentions, replies, reactions and image previews. A message that could not be sent stays with Retry.</li>
-<li>Files: send photos, videos and files (photos shrunk and location removed unless you send the original), uploads in the background, share into TalQ from other apps, in-app video and voice playback, and a Shared files view.</li>
-<li>Notifications through UnifiedPush (for example ntfy) and your server's web push. A muted topic stays silent.</li>
-<li>One-to-one audio and video calls with TalQ for desktop and the Nextcloud web app: incoming calls ring like phone calls, also over the lock screen; mute, camera, speaker and Bluetooth; the call goes on with the screen off. Needs Talk's high-performance backend on the server.</li>
-<li>Optional shift status from your organisation's ERP.</li>
-<li>Four themes, as on desktop (Ember, Warm, Vivid, Paper), or following the phone's light/dark setting.</li>
+<li>Topics as tabs beside General, a "next unread topic" button, new topics, and a notification level per topic.</li>
+<li>Formatted messages, replies, reactions, image previews and read marks. Edit and delete, select several to copy, forward or delete, and jump to a quoted message.</li>
+<li>Type @ to mention someone. "typing…" where your server offers it; yours is shared only when your Talk settings say so.</li>
+<li>Send silently, or later. Scheduled messages can be changed until they go.</li>
+<li>Voice messages: touch and hold the microphone to record.</li>
+<li>Drafts wait in their chat. A message that could not be sent is tried again when the app is back online.</li>
 </ul>
 
-Group calls are not there yet.
+<b>Conversations</b>
+<ul>
+<li>Folders, the same as in TalQ for desktop, kept in sync through your own Nextcloud Files if you turn that on.</li>
+<li>Sort, filter and search the list. Unread counts with mentions marked, and a grey count for what is muted.</li>
+<li>Start chats and groups; see who is in a group, and as a moderator add and remove members.</li>
+<li>Your own status, and the presence of the people you chat with.</li>
+<li>The list and the newest messages of your last chats open at once, and can be read offline.</li>
+</ul>
+
+<b>Files</b>
+<ul>
+<li>Photos, videos and files wait above the message box until you send them: picked, photographed, dropped or pasted. Other apps can share into TalQ; your latest chats are in Android's share sheet (Android 10 and later).</li>
+<li>Photos (JPEG, HEIC) and videos (MP4, MOV, 3GP, Matroska, WebM) lose their location and are made smaller where that helps, unless you send the original. Uploads carry on in the background.</li>
+<li>Open, save and share what you receive; videos and voice messages play in the app; a Shared files view per conversation.</li>
+</ul>
+
+<b>Notifications and calls</b>
+<ul>
+<li>Notifications through your server's web push, by way of UnifiedPush (for example ntfy) or, in the standard build, Google Play services. Reply or mark as read in the notification. A muted topic stays silent.</li>
+<li>One-to-one audio and video calls with TalQ for desktop and the Nextcloud web app: incoming calls ring like phone calls, also over the lock screen; mute, camera, speaker and Bluetooth; the call goes on with the screen off. Needs Talk's high-performance backend on the server.</li>
+</ul>
+
+<b>And</b>
+<ul>
+<li>Sign in through your browser (Nextcloud Login Flow v2): the app never sees your password. The app password it gets is encrypted with a key held in the Android Keystore and revoked when you sign out (if your server can be reached then).</li>
+<li>Phones, tablets and foldables, with touch, mouse and keyboard. Four themes, as on desktop (Ember, Warm, Vivid, Paper), or following the phone's light/dark setting.</li>
+<li>Optional shift status from your organisation's ERP.</li>
+<li>No analytics, no advertising, no trackers.</li>
+</ul>
+
+Group calls are not there yet. Some features show only where your server has them.
 
 TalQ is an independent client and is not affiliated with Nextcloud GmbH. It needs a Nextcloud server with Talk.

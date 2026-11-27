@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import talq.core.TalkClient
 import talq.core.TalkError
 import talq.core.model.ChatMessage
+import kotlin.concurrent.Volatile
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
@@ -32,6 +33,10 @@ internal class RoomFeed(
     private val scope: CoroutineScope,
     /** The session's [Waker]: the network is usable again, a failed poll goes now. */
     private val waker: Waker,
+    /** The poll works again after it had failed. */
+    private val onRecovered: () -> Unit,
+    /** The server refuses the chat to the user from now on ([closesChat]). */
+    private val onRefused: (TalkError) -> Unit,
 ) {
     private val _incoming = MutableSharedFlow<List<ChatMessage>>(extraBufferCapacity = 64)
     private val _error = MutableStateFlow<TalkError?>(null)
@@ -40,6 +45,11 @@ internal class RoomFeed(
     private val mutex = Mutex()
     private var users = 0
     private var job: Job? = null
+
+    /** Where the poll that runs began: every message after this one comes through [incoming]. */
+    @Volatile
+    var began: Long = Long.MAX_VALUE
+        private set
 
     /** Batches of new messages, oldest first, unfiltered (update signals included). */
     val incoming: SharedFlow<List<ChatMessage>> = _incoming.asSharedFlow()
@@ -62,15 +72,17 @@ internal class RoomFeed(
     /**
      * Pin the poll's starting point to the room's newest message. A repository calls this
      * BEFORE it loads its first page: anything that arrives after this point comes through
-     * the poll, anything before it is in the page, so nothing falls in between.
+     * the poll, anything before it is in the page, so nothing falls in between. Returns it:
+     * every message up to it was stored before the page is asked for.
      */
-    suspend fun ensureCursor() {
-        if (cursor.value != null) return
-        mutex.withLock {
-            if (cursor.value != null) return
-            val newest = client.history(token, limit = 1)
-            noteCommonRead(newest.lastCommonRead)
-            cursor.value = newest.messages.lastOrNull()?.id ?: 0L
+    suspend fun ensureCursor(): Long {
+        cursor.value?.let { return it }
+        return mutex.withLock {
+            cursor.value ?: run {
+                val newest = client.history(token, limit = 1)
+                noteCommonRead(newest.lastCommonRead)
+                (newest.messages.lastOrNull()?.id ?: 0L).also { cursor.value = it }
+            }
         }
     }
 
@@ -95,6 +107,7 @@ internal class RoomFeed(
 
     private suspend fun loop() {
         var from = cursor.filterNotNull().first()
+        began = from
         var backoff = MIN_BACKOFF
         while (scope.isActive) {
             val wakes = waker.mark()
@@ -108,7 +121,10 @@ internal class RoomFeed(
                 val page = waker.unlessWoken {
                     client.pollMessages(token, from, timeoutSeconds = wait, lastCommonReadId = _commonRead.value)
                 } ?: continue
-                _error.value = null
+                if (_error.value != null) {
+                    _error.value = null
+                    onRecovered()
+                }
                 noteCommonRead(page.lastCommonRead)
                 backoff = MIN_BACKOFF
                 // The server's own cursor counts comments this user is not shown (an expired
@@ -124,7 +140,9 @@ internal class RoomFeed(
                 // Nothing new and no wait on the server's side: never spin.
                 if (page.isEmpty && !moved && asked.elapsedNow() < QUICK_ANSWER) delay(MIN_BACKOFF)
             } catch (e: TalkError) {
+                val before = _error.value
                 _error.value = e
+                if (e.closesChat && before?.closesChat != true) onRefused(e)
                 // A dead session or a room we were removed from will not heal by hammering it.
                 val fatal = e is TalkError.Unauthorized || e is TalkError.NotFound || e is TalkError.Forbidden
                 if (fatal) {

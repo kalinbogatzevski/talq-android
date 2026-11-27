@@ -45,7 +45,8 @@ class NotificationGate(context: Context, private val levels: NotifyLevelStore, p
     /** The answer for one notification. [topic] is the topic as just fetched, when it was. */
     class Verdict(val blocked: Boolean, val topic: TalkThreadInfo?)
 
-    private fun account(session: TalkSession? = currentSession()): String =
+    /** The account notifications are about: the open session's, else (a push started the app) the last one's. */
+    fun account(session: TalkSession? = currentSession()): String =
         session?.let { accountKey(it) } ?: levels.account
 
     private fun roomLevel(session: TalkSession?, account: String, token: String): Int =
@@ -75,6 +76,21 @@ class NotificationGate(context: Context, private val levels: NotifyLevelStore, p
             else -> Quick.Wait
         }
     }
+
+    /**
+     * Whether the line [subject] of a push is a message in a one-to-one conversation, judged without waiting for
+     * anything, also in a process that has no session yet. There the first line is the other person's name and
+     * nothing else (Talk's `Notifier::parseChatMessage`, whatever the language); a reaction's says more, and a
+     * sensitive conversation's names nobody. False = no, or not known.
+     */
+    fun isDirectMessage(token: String, subject: String): Boolean {
+        val firstLine = subject.substringBefore('\n', "")
+        return token.isNotEmpty() && firstLine.isNotEmpty() && levels.person(account(), token) == firstLine.hashCode()
+    }
+
+    /** Whether [token] is marked sensitive, as the list says, else as the last one had it; null = not known. */
+    fun isSensitive(session: TalkSession?, token: String): Boolean? =
+        if (token.isEmpty()) false else session?.rooms?.room(token)?.isSensitive ?: levels.sensitive(account(session), token)
 
     /**
      * Some topic of the conversation is stored as "never". A chat notification whose topic
@@ -132,8 +148,8 @@ class NotificationGate(context: Context, private val levels: NotifyLevelStore, p
     }
 
     /**
-     * Keep the stored levels current for as long as the process lives: conversation levels
-     * from every conversation list that loads, topic levels through the session's listener
+     * Keep the stored levels current for as long as the process lives: conversation levels (and
+     * which ones are one-to-one) from every conversation list that loads, topic levels through the session's listener
      * (set in `AppContainer.opened`), and a [sweep] after each change.
      */
     suspend fun run(sessionState: StateFlow<SessionState>) {
@@ -146,6 +162,8 @@ class NotificationGate(context: Context, private val levels: NotifyLevelStore, p
                     session.rooms.rooms.collect { rooms ->
                         if (session.rooms.state.value.loaded) {
                             levels.putRooms(account, rooms.associate { it.token to it.notificationLevel })
+                            levels.putPeople(account, rooms.filter { it.isOneToOne }.associate { it.token to it.displayName })
+                            levels.putSensitive(account, rooms.associate { it.token to it.isSensitive })
                         }
                     }
                 }

@@ -69,15 +69,38 @@ class SoundStore(context: Context) {
     val message: StateFlow<Sound> = _message.asStateFlow()
     val ring: StateFlow<Sound> = _ring.asStateFlow()
 
-    /** The channel ids for messages, mentions and ringing as they stand now. */
-    val messagesChannel: String get() = versioned("messages", prefs.getInt(KEY_MESSAGE_VERSION, 0))
-    val mentionsChannel: String get() = versioned("mentions", prefs.getInt(KEY_MESSAGE_VERSION, 0))
+    /**
+     * The channel ids for direct messages and mentions, for other messages, and for ringing as they stand now.
+     * The first two are the channels earlier versions had for mentions and for all messages (see [directBase]).
+     */
+    val directChannel: String get() = versioned(directBase, prefs.getInt(KEY_MESSAGE_VERSION, 0))
+    val otherChannel: String get() = versioned(BASE_OTHER, prefs.getInt(KEY_MESSAGE_VERSION, 0))
     val ringChannel: String get() = versioned("call_ring", prefs.getInt(KEY_RING_VERSION, 0))
 
-    /** Picks the message sound: the message and mention channels are made anew with it. */
+    /** A message sound was picked: the message channels carry it. Before that they have the phone's default. */
+    val messagePicked: Boolean get() = prefs.getInt(KEY_MESSAGE_VERSION, 0) > 0
+
+    /**
+     * The direct channel is the old "Mentions" one, with the settings the user gave it, except on a phone where
+     * it had been turned down below "Messages": one-to-one messages came on "Messages" until 0.10.0 and must not
+     * go quiet with it. There the direct channel is a new one, and the old one is left alone. Decided once.
+     */
+    private val directBase: String by lazy {
+        prefs.getString(KEY_DIRECT_BASE, null) ?: run {
+            val manager = NotificationManagerCompat.from(app)
+            val version = prefs.getInt(KEY_MESSAGE_VERSION, 0)
+            val messages = manager.getNotificationChannelCompat(versioned(BASE_OTHER, version))
+            val mentions = manager.getNotificationChannelCompat(versioned(BASE_MENTIONS, version))
+            val turnedDown = messages != null && mentions != null &&
+                (mentions.importance < messages.importance || (mentions.sound == null && messages.sound != null))
+            (if (turnedDown) BASE_DIRECT else BASE_MENTIONS).also { prefs.edit().putString(KEY_DIRECT_BASE, it).apply() }
+        }
+    }
+
+    /** Picks the message sound: both message channels are made anew with it. */
     fun setMessage(sound: Sound) {
         if (sound == _message.value) return
-        val old = listOf(messagesChannel, mentionsChannel)
+        val old = listOf(directChannel, otherChannel)
         write(KEY_MESSAGE, sound)
         prefs.edit().putInt(KEY_MESSAGE_VERSION, prefs.getInt(KEY_MESSAGE_VERSION, 0) + 1).apply()
         _message.value = sound
@@ -154,6 +177,10 @@ class SoundStore(context: Context) {
         const val KEY_RING = "ring"
         const val KEY_MESSAGE_VERSION = "message_channel_version"
         const val KEY_RING_VERSION = "ring_channel_version"
+        const val KEY_DIRECT_BASE = "direct_channel"
+        const val BASE_OTHER = "messages"
+        const val BASE_MENTIONS = "mentions"
+        const val BASE_DIRECT = "direct"
     }
 }
 

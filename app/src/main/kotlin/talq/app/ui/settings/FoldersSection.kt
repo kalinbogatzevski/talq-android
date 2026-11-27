@@ -29,6 +29,7 @@ import talq.app.appName
 import talq.app.folders.folderSyncDescription
 import talq.app.folders.folderSyncRow
 import talq.app.theme.TalqTheme
+import talq.app.ui.common.WAITING_FOR_SERVER
 import talq.core.folders.FolderSyncState
 
 /**
@@ -82,14 +83,17 @@ fun FoldersSection() {
         // Never before the last sync (the ticker is up to a minute behind).
         nowMs = maxOf(now, syncStatus.lastSyncedMs),
     )
+    // The account behind the saved list is being checked: the switch as it is kept, and nothing to change yet.
+    val waiting = session !is SessionState.SignedIn && session !is SessionState.SignedOut
     FolderSwitchRow(
         title = "Keep my folders in sync",
         detail = folderSyncDescription(),
-        checked = row.enabled,
+        checked = if (waiting) folders.sync.isEnabledFor(folders.store.scopeKey) else row.enabled,
         enabled = row.available,
         onChange = { on -> if (on) folders.sync.enable() else folders.sync.disable() },
     )
     when {
+        waiting -> FolderStatusLine(WAITING_FOR_SERVER, colors.textSecondary)
         !row.available && row.whyNot.isNotEmpty() -> FolderStatusLine(row.whyNot, colors.textSecondary)
         row.statusText.isNotEmpty() -> FolderStatusLine(
             row.statusText,

@@ -38,8 +38,14 @@ data class SectionRows<T>(
     val closed: Boolean,
 )
 
-/** What one list row adds to its section: its token and the numbers its own badge shows. */
-data class FolderMember(val token: String, val unread: Int, val mention: Boolean, val directMention: Boolean)
+/** What one list row adds to its section: its token and the numbers its own badges show ([muted]: its grey one). */
+data class FolderMember(
+    val token: String,
+    val unread: Int,
+    val mention: Boolean,
+    val directMention: Boolean,
+    val muted: Int = 0,
+)
 
 /**
  * The partition of [sorted] by [state]. [member] reads a row's token and counted unread numbers.
@@ -74,10 +80,10 @@ fun <T> buildFolderSections(
         val f = if (folderId == null) -1 else indexById[folderId] ?: -1
         if (f >= 0) {
             members[f].add(row)
-            rollups[f] = addToRollup(rollups[f], m.unread, m.mention, m.directMention)
+            rollups[f] = addToRollup(rollups[f], m.unread, m.mention, m.directMention, m.muted)
         } else {
             other.add(row)
-            otherRollup = addToRollup(otherRollup, m.unread, m.mention, m.directMention)
+            otherRollup = addToRollup(otherRollup, m.unread, m.mention, m.directMention, m.muted)
         }
     }
 
@@ -96,30 +102,31 @@ fun <T> buildFolderSections(
 /**
  * A room as a folder member, by desktop's "counted unread" rule: a room set to Never adds nothing
  * unless [countMuted], and its mention flags count only when its counted number is above zero.
- * (Desktop also leaves out unread messages in silenced topics; the room list has no per-topic
- * numbers, so they are counted here.) [countMuted] has no default on purpose: whether a muted
+ * [mutedPart] is how many of its unread messages were muted (all of them in a room set to Never, else
+ * those in silenced topics: `mutedUnread`): they are left out of the counted number and handed on
+ * apart, for the grey badge. [countMuted] has no default on purpose: whether a muted
  * room's number belongs in its folder's total is the screen's decision.
  */
-fun roomFolderMember(room: Room, countMuted: Boolean): FolderMember {
-    val counted = when {
-        countMuted -> maxOf(0, room.unreadMessages)
-        room.notificationLevel == NotificationLevel.NEVER -> 0
-        else -> maxOf(0, room.unreadMessages)
-    }
+fun roomFolderMember(room: Room, countMuted: Boolean, mutedPart: Int = 0): FolderMember {
+    val unread = maxOf(0, room.unreadMessages)
+    val muted = if (countMuted) 0 else mutedPart.coerceIn(0, unread)
+    val counted = if (!countMuted && room.notificationLevel == NotificationLevel.NEVER) 0 else unread - muted
     return FolderMember(
         token = room.token,
         unread = counted,
         mention = room.unreadMention && counted > 0,
         directMention = room.unreadMentionDirect && counted > 0,
+        muted = muted,
     )
 }
 
-/** [buildFolderSections] for the conversation list's rooms. */
+/** [buildFolderSections] for the conversation list's rooms; [mutedPart] as in [roomFolderMember]. */
 fun buildRoomSections(
     sorted: List<Room>,
     state: FolderState,
     countMuted: Boolean,
     searching: Boolean = false,
     filterActive: Boolean = searching,
+    mutedPart: (Room) -> Int = { 0 },
 ): List<SectionRows<Room>> =
-    buildFolderSections(sorted, state, { roomFolderMember(it, countMuted) }, searching, filterActive)
+    buildFolderSections(sorted, state, { roomFolderMember(it, countMuted, mutedPart(it)) }, searching, filterActive)

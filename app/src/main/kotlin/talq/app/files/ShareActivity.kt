@@ -56,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -67,13 +68,17 @@ import talq.app.SessionState
 import talq.app.appContainer
 import talq.app.appName
 import talq.app.nav.DeepLink
+import talq.app.share.ChatShortcuts
 import talq.app.theme.TalqTheme
+import talq.app.ui.chat.tooLongText
 import talq.app.ui.common.Avatar
 import talq.app.ui.common.LoadingScreen
 import talq.app.ui.common.MessagePane
 import talq.app.ui.common.userMessage
 import talq.app.ui.message.topicColor
 import talq.core.model.Room
+import talq.core.model.captionOver
+import talq.core.model.messageOver
 import talq.core.repo.ChatScope
 import talq.core.repo.TalkSession
 
@@ -81,6 +86,7 @@ import talq.core.repo.TalkSession
  * "Share" in another app, then TalQ: pick a chat (search, most recent first), pick where in
  * it (General or a topic, when the chat has topics), add a message, send. Files then go the
  * same way as from the paperclip (`UploadManager.enqueue`); shared text goes as a message.
+ * A chat picked in the share sheet itself ([ChatShortcuts]) is picked already.
  *
  * Exported, so the intent is not trusted: only `content://` items are read (never a file
  * path, never our own FileProvider), and they are copied into the cache while this screen
@@ -128,6 +134,10 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
     /** The shared text: the message, or the caption of the first file. Editable. */
     var text by mutableStateOf("")
 
+    /** The chat tapped in the share sheet (a [ChatShortcuts] id, unless another app made it up); empty = none. */
+    var shortcutId = ""
+        private set
+
     /** How many items the other app offered that may be read. */
     var offered by mutableStateOf(0)
         private set
@@ -142,8 +152,10 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         val uris = sharedUris(intent).filter { Staging.isAcceptable(app, it) }
         offered = uris.size
-        text = runCatching { intent?.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }.getOrNull().orEmpty().take(MAX_TEXT)
+        text = runCatching { intent?.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }.getOrNull().orEmpty()
+        shortcutId = runCatching { intent?.getStringExtra(ShortcutManagerCompat.EXTRA_SHORTCUT_ID) }.getOrNull().orEmpty()
         val original = uploads.prefs.sendOriginal
+        originals = original
         staging = viewModelScope.launch {
             // Nothing is copied for someone who is not signed in: any app can start this screen.
             app.appContainer.sessionState.first { it is SessionState.SignedIn }
@@ -155,6 +167,10 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Photos left out because they could not be made smaller (and Send original is off). */
     var unprepared by mutableStateOf(0)
+        private set
+
+    /** "Send original" when this was shared: the photos are copied by it, the videos sent by it. */
+    var originals = false
         private set
 
     /** The files now belong to the upload queue. Empty the second time. */
@@ -187,7 +203,6 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val MAX_ITEMS = 50
-        const val MAX_TEXT = 32_000
     }
 }
 
@@ -217,15 +232,33 @@ private fun ShareScreen(vm: ShareViewModel, onOpenApp: () -> Unit, onSent: (toke
 @Composable
 private fun SharePicker(session: TalkSession, vm: ShareViewModel, onSent: (String, Long) -> Unit, onClose: () -> Unit) {
     val colors = TalqTheme.colors
-    val uploads = androidx.compose.ui.platform.LocalContext.current.appContainer.uploads
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val uploads = context.appContainer.uploads
     val rooms by session.rooms.rooms.collectAsStateWithLifecycle()
     val roomsLoad by session.rooms.state.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
     var pickedToken by rememberSaveable { mutableStateOf<String?>(null) }
     var threadId by rememberSaveable { mutableLongStateOf(0L) }
     val picked = pickedToken?.let { t -> rooms.firstOrNull { it.token == t } }
+    // Once: after Back (to the list) or a rotation the chat from the share sheet is not picked again.
+    var fromSheet by rememberSaveable { mutableStateOf(vm.shortcutId) }
 
-    LaunchedEffect(session) { session.rooms.refresh() }
+    // Files don't reach a conversation on another server (the routes are local only).
+    fun takes(room: Room): Boolean = vm.offered == 0 || !room.isFederated
+    LaunchedEffect(session) {
+        // From the list held already, else from what this screen's own reload brings: an error from before
+        // it says nothing. A chat that is gone or takes no posts: the list.
+        fun pickFromSheet(wait: Boolean) {
+            if (fromSheet.isEmpty()) return
+            val room = ChatShortcuts.roomOf(context, session, session.rooms.rooms.value, fromSheet)
+            if (room == null && wait && !session.rooms.state.value.loaded) return
+            if (room != null && takes(room) && room.takesPosts(session.capabilities, System.currentTimeMillis() / 1000)) pickedToken = room.token
+            fromSheet = ""
+        }
+        pickFromSheet(wait = true)
+        session.rooms.refresh()
+        pickFromSheet(wait = false)
+    }
     BackHandler(enabled = pickedToken != null) { pickedToken = null }
 
     val staged = vm.staged
@@ -255,6 +288,9 @@ private fun SharePicker(session: TalkSession, vm: ShareViewModel, onSent: (Strin
             when {
                 nothing -> MessagePane(title = "Nothing to send", detail = "${appName()} can't read what the other app shared.")
                 noUploads -> MessagePane(title = "Files can't be sent", detail = "This server doesn't allow you to upload files into chats.")
+                fromSheet.isNotEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(26.dp), strokeWidth = 2.5.dp)
+                }
                 picked == null -> {
                     OutlinedTextField(
                         value = query,
@@ -265,7 +301,7 @@ private fun SharePicker(session: TalkSession, vm: ShareViewModel, onSent: (Strin
                     )
                     val shown = remember(rooms, query) {
                         val q = query.trim()
-                        rooms.filter { !it.isReadOnly && (q.isEmpty() || it.displayName.contains(q, ignoreCase = true)) }
+                        rooms.filter { !it.isReadOnly && takes(it) && (q.isEmpty() || it.displayName.contains(q, ignoreCase = true)) }
                     }
                     when {
                         shown.isEmpty() && !roomsLoad.loaded && roomsLoad.error == null ->
@@ -303,7 +339,7 @@ private fun SharePicker(session: TalkSession, vm: ShareViewModel, onSent: (Strin
                                 when {
                                     staged == null -> "Preparing ${vm.offered} ${if (vm.offered == 1) "file" else "files"}…"
                                     failed > 0 && failed == vm.unprepared ->
-                                        "$files ${if (files == 1) "file" else "files"} ($failed couldn't be made smaller; turn on Send original in a chat's paperclip to send as it is)"
+                                        "$files ${if (files == 1) "file" else "files"} ($failed couldn't be made smaller)"
                                     failed > 0 && files == 0 -> "The shared ${if (vm.offered == 1) "file" else "files"} couldn't be read."
                                     failed > 0 -> "$files ${if (files == 1) "file" else "files"} ($failed couldn't be read)"
                                     else -> "$files ${if (files == 1) "file" else "files"}"
@@ -314,12 +350,16 @@ private fun SharePicker(session: TalkSession, vm: ShareViewModel, onSent: (Strin
                         }
                         OutlinedTextField(
                             value = vm.text,
-                            onValueChange = { vm.text = it.take(maxLength) },
+                            onValueChange = { vm.text = it },
                             placeholder = { Text(if (vm.offered > 0) "Add a message" else "Message") },
                             maxLines = 5,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                         )
-                        val ready = staged != null && (staged.isNotEmpty() || vm.text.isNotBlank())
+                        // Never cut, as in a chat's own box. A server without captions gets it as a message of its own.
+                        val captions = files > 0 && session.capabilities.mediaCaption
+                        val over = vm.text.trim().let { if (captions) captionOver(it, maxLength) else messageOver(it, maxLength) }
+                        if (over > 0) Text(tooLongText(over), style = MaterialTheme.typography.labelMedium, color = colors.danger)
+                        val ready = staged != null && (staged.isNotEmpty() || vm.text.isNotBlank()) && over == 0
                         Button(
                             enabled = ready && !vm.sent,
                             onClick = {
@@ -327,9 +367,11 @@ private fun SharePicker(session: TalkSession, vm: ShareViewModel, onSent: (Strin
                                 val token = picked.token
                                 val files = vm.handOff()
                                 val message = vm.text.trim()
+                                val asCaption = files.isNotEmpty() && session.capabilities.mediaCaption
                                 if (files.isNotEmpty()) {
-                                    uploads.enqueue(session, token, threadId, files, message)
-                                } else {
+                                    uploads.enqueue(session, token, threadId, files, if (asCaption) message else "", originals = vm.originals)
+                                }
+                                if (!asCaption && message.isNotEmpty()) {
                                     session.chat(token, if (threadId > 0) ChatScope.Topic(threadId) else ChatScope.All).send(message)
                                 }
                                 onSent(token, threadId)

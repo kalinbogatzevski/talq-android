@@ -60,6 +60,13 @@ data class TalkCapabilities(
     val threads: Boolean get() = has("threads")
     val reactions: Boolean get() = has("reactions")
     val readMarker: Boolean get() = has("chat-read-marker")
+
+    /** A chat can be marked read without a message id: up to the conversation's last one. */
+    val readLast: Boolean get() = has("chat-read-last")
+
+    /** A chat can be marked unread (`DELETE chat/{token}/read`). */
+    val markUnread: Boolean get() = has("chat-unread")
+
     val referenceId: Boolean get() = has("chat-reference-id")
     val keepNotifications: Boolean get() = has("chat-keep-notifications")
 
@@ -97,14 +104,35 @@ data class TalkCapabilities(
     /** The shared-items endpoints (`/chat/{token}/share...`) exist. */
     val sharedItems: Boolean get() = has("rich-object-list-media")
 
+    /** The messages around one can be read, however far back it is (see `TalkClient.newer`). */
+    val messageContext: Boolean get() = has("chat-get-context")
+
     /** A chat message can be sent without notifying anyone (`silent` on the send). */
     val silentSend: Boolean get() = has("silent-send")
+
+    /** Conversations can be favourites, pinned to the top of the list. */
+    val favorites: Boolean get() = has("favorites")
+
+    /** The user can choose what a conversation notifies them of ([NotificationLevel]). */
+    val notificationLevels: Boolean get() = has("notification-levels")
+
+    /** Ringing for calls is a switch of its own per conversation. */
+    val notificationCalls: Boolean get() = has("notification-calls")
+
+    /** Conversations can be archived: out of the list, kept with their history. */
+    val archivedConversations: Boolean get() = has("archived-conversations-v2")
+
+    /** Conversations can be marked as important (they notify also where others are held back). */
+    val importantConversations: Boolean get() = has("important-conversations")
 
     /** The user's own "Note to self" conversation can be asked for (`GET room/note-to-self` makes it). */
     val noteToSelf: Boolean get() = has("note-to-self")
 
-    /** The `/chat/{token}/schedule` family (list, schedule, edit, delete) exists. */
+    /** The `/chat/{token}/schedule` family (list, schedule, edit, delete) exists; not for a federated conversation. */
     val scheduledMessages: Boolean get() = has("scheduled-messages")
+
+    /** Bots can be enabled per conversation (`bot/{token}` lists them). */
+    val bots: Boolean get() = has("bots-v1")
 
     /**
      * A shared file can be flagged as a voice message (`talkMetaData.messageType` =

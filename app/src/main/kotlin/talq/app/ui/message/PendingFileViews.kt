@@ -44,11 +44,17 @@ import talq.app.theme.TalqTheme
 
 /**
  * A file on its way out: thumbnail (photos) or a type icon, name, size, what is happening to
- * it and its progress, with Cancel while it is going and Retry / Delete once it failed.
- * Like a failed text, it stays until the user decides.
+ * it and its progress, with Cancel while it is going and Retry / Delete once it failed; [onOriginal] sends a
+ * file whose location could not be removed as it is. Like a failed text, it stays until the user decides.
  */
 @Composable
-fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> Unit, caption: String = upload.caption) {
+fun PendingFileRow(
+    upload: PendingUpload,
+    onRetry: () -> Unit,
+    onOriginal: () -> Unit,
+    onDiscard: () -> Unit,
+    caption: String = upload.caption,
+) {
     val colors = TalqTheme.colors
     val context = LocalContext.current
     val state = upload.state
@@ -89,7 +95,7 @@ fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> 
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f, fill = false).widthIn(min = 150.dp)) {
                     Text(
-                        upload.name.ifEmpty { "Preparing…" },
+                        upload.name,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                         color = colors.textPrimary,
@@ -98,8 +104,8 @@ fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> 
                     )
                     val size = if (upload.size > 0) Formatter.formatShortFileSize(context, upload.size) else ""
                     val status = when (state) {
-                        UploadState.Preparing -> if (upload.name.isEmpty()) "" else "Preparing…"
                         UploadState.Queued -> "Waiting"
+                        is UploadState.Compressing -> "Compressing ${(state.fraction * 100).toInt()}%"
                         is UploadState.Uploading -> "${(state.fraction * 100).toInt()}%"
                         UploadState.Sharing -> "Sending…"
                         is UploadState.Failed, UploadState.Interrupted, UploadState.Lost -> "Not sent"
@@ -112,9 +118,10 @@ fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> 
                     if (!failed) {
                         Spacer(Modifier.height(5.dp))
                         val bar = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp))
-                        if (state is UploadState.Uploading) {
+                        val fraction = (state as? UploadState.Compressing)?.fraction ?: (state as? UploadState.Uploading)?.fraction
+                        if (fraction != null) {
                             LinearProgressIndicator(
-                                progress = { state.fraction },
+                                progress = { fraction },
                                 modifier = bar,
                                 color = colors.accent,
                                 trackColor = colors.bgSecondary,
@@ -126,7 +133,6 @@ fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> 
                     }
                 }
                 if (!failed) {
-                    // While the files are still being copied, this stops the whole pick.
                     IconButton(onClick = onDiscard) {
                         Icon(Icons.Filled.Close, contentDescription = "Cancel upload", tint = colors.textSecondary)
                     }
@@ -161,6 +167,7 @@ fun PendingFileRow(upload: PendingUpload, onRetry: () -> Unit, onDiscard: () -> 
             Row {
                 TextButton(onClick = onDiscard) { Text("Delete", color = colors.textSecondary) }
                 if (state != UploadState.Lost) TextButton(onClick = onRetry) { Text("Retry") }
+                if (state is UploadState.Failed && state.original) TextButton(onClick = onOriginal) { Text("Send original") }
             }
         }
     }

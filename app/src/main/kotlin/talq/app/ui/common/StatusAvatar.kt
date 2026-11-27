@@ -84,10 +84,10 @@ private fun shiftWord(state: ShiftState): String = when (state) {
     ShiftState.Unknown -> ""
 }
 
-/** "Online, on shift" for a screen reader; empty when there is nothing to say. */
-fun statusDescription(presence: String, shift: ShiftState): String {
-    // Only what is drawn is read out: offline has no dot and gets no word.
-    val shown = if (presence in DRAWN_PRESENCE) presenceWord(presence) else ""
+/** "Online, on shift" for a screen reader; empty when there is nothing to say. [everyState] as in [StatusAvatar]. */
+fun statusDescription(presence: String, shift: ShiftState, everyState: Boolean = false): String {
+    // Only what is drawn is read out: where offline has no dot it gets no word.
+    val shown = if (everyState || presence in DRAWN_PRESENCE) presenceWord(presence) else ""
     val work = shiftWord(shift)
     return when {
         shown.isEmpty() -> work.replaceFirstChar { it.uppercase() }
@@ -103,8 +103,8 @@ fun statusDescription(presence: String, shift: ShiftState): String {
  * @param ring the colour of the ground the avatar sits on: each mark is ringed in it, so it
  *   reads against any picture behind it
  * @param presence the room's `status` (`online`, `away`, `dnd`, `busy`, ...)
- * @param everyState the user's own avatar: the disc is drawn for every known state, offline and
- *   invisible in the muted ink (TalQ for desktop's own status dot); others show none for those
+ * @param everyState the user's own avatar, and the lists of people: the disc is drawn for every known state,
+ *   offline and invisible in the muted ink (TalQ for desktop's own status dot); others show none for those
  */
 @Composable
 fun StatusAvatar(
@@ -121,7 +121,7 @@ fun StatusAvatar(
     val colors = TalqTheme.colors
     val dot = presenceColor(presence, colors) ?: colors.textMuted.takeIf { everyState && presence.isNotEmpty() }
     val square = shiftColor(shift, colors)
-    val description = statusDescription(presence, shift)
+    val description = statusDescription(presence, shift, everyState)
     Box(
         modifier
             .size(size)

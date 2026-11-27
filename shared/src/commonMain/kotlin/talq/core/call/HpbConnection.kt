@@ -61,13 +61,15 @@ sealed interface HpbState {
  * candidates never carry over to another session. Further attempts back off from 2 s to 60 s.
  *
  * [refreshSettings] fetches a fresh ticket for a new session after the first (the ticket in
- * [settings] may have expired by then). The ticket is never logged.
+ * [settings] may have expired by then). The ticket is never logged. [reconnect] false: a lost
+ * connection is not reopened (nor the room joined again); the state is then [HpbState.Failed].
  */
 class HpbConnection(
     private val http: HttpClient,
     settings: SignalingSettings,
     ncServerUrl: String,
     private val scope: CoroutineScope,
+    private val reconnect: Boolean = true,
     private val refreshSettings: (suspend () -> SignalingSettings)? = null,
 ) {
     private val backendUrl = ncServerUrl.trimEnd('/') + "/ocs/v2.php/apps/spreed/api/v3/signaling/backend"
@@ -248,6 +250,10 @@ class HpbConnection(
                 }
             }
             if (closing) return
+            if (!reconnect && first.isCompleted) {
+                _state.value = HpbState.Failed("the signaling connection was lost")
+                return
+            }
             if (rejected != null) {
                 val why = "the signaling server refused the hello ($rejected)"
                 if (!first.isCompleted) {

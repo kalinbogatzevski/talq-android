@@ -1,11 +1,9 @@
 package talq.app.files
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
 import java.io.File
 import java.io.IOException
-import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,27 +18,31 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import talq.app.ui.chat.ComposerDrafts
 import talq.app.ui.common.userMessage
 import talq.core.TalkError
 import talq.core.model.ChatMessage
+import talq.core.repo.DiscardedFile
 import talq.core.repo.FileOutboxEntry
 import talq.core.repo.FileSendState
 import talq.core.repo.FileToSend
+import talq.core.repo.PreparedFile
 import talq.core.repo.TalkSession
 
 /** What a pending file bubble shows. */
 sealed interface UploadState {
-    /** Being copied into the cache (and shrunk, for a photo). */
-    data object Preparing : UploadState
-
     data object Queued : UploadState
+
+    /** A video is being made smaller ([VideoShrink]). */
+    data class Compressing(val fraction: Float) : UploadState
 
     data class Uploading(val fraction: Float) : UploadState
 
     /** Uploaded; being posted into the chat. */
     data object Sharing : UploadState
 
-    data class Failed(val message: String) : UploadState
+    /** [original]: it can still go as it is, with its location, when the user says so ([UploadManager.sendOriginal]). */
+    data class Failed(val message: String, val original: Boolean = false) : UploadState
 
     /** The app was closed before this file went out. Nothing sends it until the user retries. */
     data object Interrupted : UploadState
@@ -48,7 +50,7 @@ sealed interface UploadState {
     /** The cached copy is gone (the system cleared the cache): it can only be discarded. */
     data object Lost : UploadState
 
-    val active: Boolean get() = this is Preparing || this is Queued || this is Uploading || this is Sharing
+    val active: Boolean get() = this is Queued || this is Compressing || this is Uploading || this is Sharing
 }
 
 /** A file on its way into a chat, as the chat pane shows it. */
@@ -60,10 +62,12 @@ data class PendingUpload(
     val name: String,
     val size: Long,
     val mimeType: String,
-    /** The app's cached copy (for the thumbnail); empty while preparing. */
+    /** The app's cached copy (for the thumbnail). */
     val path: String,
     val caption: String,
     val state: UploadState,
+    /** The outbox key of its last attempt: its message carries it. */
+    val referenceId: String = "",
 )
 
 /** What is kept on disk about a file until its message is in the chat (or it is discarded). */
@@ -82,13 +86,22 @@ private data class UploadRecord(
     val referenceId: String = "",
     /** Posted as a voice message (a recording); kept so a retry after a restart still is one. */
     val voiceMessage: Boolean = false,
+    /** Sent silently; kept so a retry after a restart still is. */
+    val silent: Boolean = false,
+    /**
+     * A video, or another file with places in it, that goes through [VideoShrink] when its turn comes ([path] stays
+     * the copy as it came). Null: written before 0.10.0, which sent videos as they were.
+     */
+    val smaller: Boolean? = null,
+    /** The message it answers, 0 for none; kept so a retry after a restart still does. */
+    val replyTo: Long = 0L,
 )
 
 /**
- * The app's side of sending files: copies what was picked into the cache, hands it to the
- * core's `FileOutbox`, and keeps a small list on disk so that a file whose upload did not
- * finish before the process died shows up again as a failed bubble instead of vanishing.
- * `UploadWorker` keeps the process alive (with a notification) while anything is on its way.
+ * The app's side of sending files: hands copies in the cache (of what was picked, see [AttachTrays],
+ * shared in or recorded) to the core's `FileOutbox`, and keeps a small list on disk so that a file
+ * whose upload did not finish before the process died shows up again as a failed bubble instead of
+ * vanishing. `UploadWorker` keeps the process alive (with a notification) while anything is on its way.
  *
  * All state changes happen on the main thread ([scope] is the container's).
  */
@@ -99,12 +112,9 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
     private val writeLock = Mutex()
 
     val prefs = SendPrefs(appContext)
+    private val videos = VideoShrink(appContext)
 
     private val records = MutableStateFlow(readStore())
-    private val preparing = MutableStateFlow<List<PendingUpload>>(emptyList())
-
-    /** The copying of each placeholder's batch, so the bubble's Cancel can stop it. */
-    private val preparingJobs = HashMap<String, Job>()
 
     /** Live outbox entries by key, for the rooms being watched. */
     private val live = MutableStateFlow<Map<String, FileOutboxEntry>>(emptyMap())
@@ -128,109 +138,22 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
     /** A one-line problem to show once (a file that could not be read). */
     val notice = MutableStateFlow<String?>(null)
 
+    /** Files picked but not sent yet, per conversation tab (see [AttachTrays]). */
+    val trays = AttachTrays(appContext, scope, prefs, records.value.map { it.path }.toSet()) { notice.value = it }
+
     init {
         publish()
-        val keep = records.value.map { it.path }.toSet()
-        scope.launch(Dispatchers.IO) { runCatching { Staging.sweep(appContext, keep) } }
+        val keep = records.value.map { it.path }.toSet() + trays.paths()
+        val startedAt = System.currentTimeMillis()
+        scope.launch(Dispatchers.IO) { runCatching { Staging.sweep(appContext, keep, startedAt) } }
     }
 
     private fun account(s: TalkSession): String = s.user.userId + "@" + s.credentials.server
 
     // ---- sending -------------------------------------------------------------------------
 
-    /**
-     * Send what the pickers returned into [token] (topic [threadId], 0 = General). The caption
-     * and the quote go with the first file. [onNothingSent] gets the caption back when not a
-     * single file could be read.
-     */
-    fun sendUris(
-        token: String,
-        threadId: Long,
-        uris: List<Uri>,
-        caption: String,
-        replyTo: ChatMessage?,
-        onNothingSent: (caption: String) -> Unit = {},
-    ) {
-        if (uris.isEmpty()) return
-        val original = prefs.sendOriginal
-        prepareAndSend(token, threadId, uris.size, caption, replyTo, onNothingSent) { index ->
-            Staging.stage(appContext, uris[index], original)
-        }
-    }
-
-    /** Send the photo the camera wrote into [file] (one of `Staging.newCameraFile`). */
-    fun sendCameraPhoto(
-        token: String,
-        threadId: Long,
-        file: File,
-        caption: String,
-        replyTo: ChatMessage?,
-        onNothingSent: (caption: String) -> Unit = {},
-    ) {
-        val original = prefs.sendOriginal
-        prepareAndSend(token, threadId, 1, caption, replyTo, onNothingSent) {
-            Staging.stageCamera(appContext, file, original)
-        }
-    }
-
-    private fun prepareAndSend(
-        token: String,
-        threadId: Long,
-        count: Int,
-        caption: String,
-        replyTo: ChatMessage?,
-        onNothingSent: (String) -> Unit,
-        stage: suspend (index: Int) -> StagedFile,
-    ) {
-        val placeholders = List(count) {
-            PendingUpload("p" + UUID.randomUUID(), token, threadId, "", 0, "", "", "", UploadState.Preparing)
-        }
-        val ids = placeholders.map { it.id }.toSet()
-        preparing.update { it + placeholders }
-        publish()
-        // The copying is part of the sending: the process is kept alive for it too.
-        UploadWorker.start(appContext)
-        val job = scope.launch {
-            val result = try {
-                stageAll(count, stage)
-            } catch (e: CancellationException) {
-                // Cancelled from the bubble: the message goes back into the composer.
-                onNothingSent(caption)
-                throw e
-            } finally {
-                ids.forEach { preparingJobs.remove(it) }
-                preparing.update { list -> list.filterNot { it.id in ids } }
-                publish()
-            }
-            val staged = result.files
-            notice.value = result.problem(count) ?: notice.value
-            val current = session()
-            if (staged.isEmpty() || current == null) {
-                staged.forEach { Staging.delete(appContext, it.path) }
-                onNothingSent(caption)
-            } else {
-                enqueue(current, token, threadId, staged, caption, replyTo)
-            }
-        }
-        if (job.isActive) ids.forEach { preparingJobs[it] = job }
-    }
-
     /** What [stageAll] made of the things it was given. */
-    class Staged(val files: List<StagedFile>, val unreadable: Int, val unprepared: Int) {
-        /** One line for the user about what was left out, null when nothing was. */
-        fun problem(count: Int): String? {
-            val failed = unreadable + unprepared
-            return when {
-                failed == 0 -> null
-                unprepared == failed && failed == 1 ->
-                    "A photo couldn't be made smaller, so it wasn't sent. Turn on Send original to send it as it is."
-                unprepared == failed ->
-                    "$failed photos couldn't be made smaller, so they weren't sent. Turn on Send original to send them as they are."
-                count == 1 -> "The file couldn't be read."
-                else -> "$failed of $count files couldn't be sent."
-            }
-        }
-    }
+    class Staged(val files: List<StagedFile>, val unprepared: Int)
 
     /** Copy [count] things into the cache, one after the other; what cannot be read is left out. */
     suspend fun stageAll(count: Int, stage: suspend (index: Int) -> StagedFile): Staged {
@@ -244,19 +167,21 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
                 throw e
             } catch (e: NotPreparedException) {
                 unprepared++
-                Log.w(TAG, "a photo could not be prepared", e)
+                Log.w(TAG, "a photo could not be prepared (${e::class.simpleName})")
             } catch (e: IOException) {
-                Log.w(TAG, "a file to send could not be read", e)
+                Log.w(TAG, "a file to send could not be read (${e::class.simpleName})")
             } catch (e: RuntimeException) {
-                Log.w(TAG, "a file to send could not be read", e)
+                Log.w(TAG, "a file to send could not be read (${e::class.simpleName})")
             }
         }
-        return Staged(out, count - out.size - unprepared, unprepared)
+        return Staged(out, unprepared)
     }
 
     /**
      * Hand already staged files to the room's outbox and start the background work.
-     * [voiceMessage]: post them as voice messages (a recording, see `VoiceMessages`).
+     * [voiceMessage]: post them as voice messages (a recording, see `VoiceMessages`). [silent]: without
+     * notifying anyone (only where the server has `media-caption`). [originals]: videos as they are too
+     * (photos were shrunk, or not, when they were staged).
      */
     fun enqueue(
         session: TalkSession,
@@ -266,16 +191,20 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         caption: String,
         replyTo: ChatMessage? = null,
         voiceMessage: Boolean = false,
+        silent: Boolean = false,
+        originals: Boolean = prefs.sendOriginal,
     ) {
         if (staged.isEmpty()) return
         startedFresh = false
         watch(session, token)
         val outbox = session.fileOutbox(token)
+        fun smaller(file: StagedFile) = !originals && !voiceMessage && (file.toClean || VideoShrink.isVideo(file.mimeType))
         val keys = outbox.send(
-            staged.map { FileToSend(FileByteSource(File(it.path)), it.name, it.mimeType, tag = it.path, voiceMessage = voiceMessage) },
+            staged.map { toSend(it.path, it.name, it.mimeType, voiceMessage, smaller(it)) },
             caption = caption,
             threadId = threadId,
             replyTo = replyTo,
+            silent = silent,
         )
         sentHere.addAll(keys)
         val account = account(session)
@@ -285,7 +214,8 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
                 UploadRecord(
                     id = keys[i], account = account, token = token, threadId = threadId, path = f.path, name = f.name,
                     mimeType = f.mimeType, size = f.size, caption = if (i == 0) trimmed else "", referenceId = keys[i],
-                    voiceMessage = voiceMessage,
+                    voiceMessage = voiceMessage, silent = silent, smaller = smaller(f),
+                    replyTo = if (i == 0) replyTo?.id ?: 0L else 0L,
                 )
             }
         }
@@ -294,17 +224,42 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         UploadWorker.start(appContext)
     }
 
+    private fun toSend(path: String, name: String, mimeType: String, voiceMessage: Boolean, smaller: Boolean): FileToSend {
+        val file = File(path)
+        return FileToSend(
+            FileByteSource(file), name, mimeType, tag = path, voiceMessage = voiceMessage,
+            prepare = if (smaller) withoutDetails(file, VideoShrink.isVideo(mimeType)) else null,
+        )
+    }
+
+    private fun withoutDetails(file: File, compress: Boolean): suspend (String, (Float) -> Unit) -> PreparedFile? =
+        { name, onProgress -> videos.prepare(file, name, compress, onProgress) }
+
     // ---- the bubble's buttons ------------------------------------------------------------
 
     fun retry(id: String) {
         val record = records.value.firstOrNull { it.id == id } ?: return
-        val current = session() ?: return
-        if (record.referenceId in live.value) {
+        val current = session()?.takeIf { account(it) == record.account } ?: return
+        val entry = live.value[record.referenceId]
+        if (entry != null) {
+            if ((entry.state as? FileSendState.Failed)?.unprepared == true) File(record.path).parentFile?.let { VideoShrink.forgetTries(it) }
             current.fileOutbox(record.token).retry(record.referenceId)
             UploadWorker.start(appContext)
         } else {
             scope.launch { resume(current, listOf(record)) }
         }
+    }
+
+    /** The user wants a file whose location could not be removed sent as it is. Only this one, and kept so after a restart. */
+    fun sendOriginal(id: String) {
+        val record = records.value.firstOrNull { it.id == id } ?: return
+        val current = session() ?: return
+        val state = live.value[record.referenceId]?.state
+        if ((state as? FileSendState.Failed)?.unprepared != true) return
+        records.update { list -> list.map { if (it.id == id) it.copy(smaller = false) else it } }
+        persist()
+        current.fileOutbox(record.token).retry(record.referenceId, asItIs = true)
+        UploadWorker.start(appContext)
     }
 
     /**
@@ -325,23 +280,60 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         UploadWorker.start(appContext)
     }
 
-    /** Cancel or give up on a file. */
-    fun discard(id: String) {
-        preparingJobs[id]?.let {
-            it.cancel()
-            return
-        }
-        val record = records.value.firstOrNull { it.id == id } ?: return
+    /**
+     * Cancel or give up on a file. Answers the caption and the quote it carried when no other file of its
+     * send has them now: they go back into the box the user looks at.
+     */
+    fun discard(id: String): DiscardedFile? {
+        val record = records.value.firstOrNull { it.id == id } ?: return null
         val current = session()
-        if (current != null && record.referenceId in live.value) {
-            // The entry leaving the outbox removes the record and the cached copy.
-            current.fileOutbox(record.token).discard(record.referenceId)
-        } else {
+        if (current == null || record.referenceId !in live.value) {
             remove(setOf(id))
+            return DiscardedFile(record.caption, null, record.replyTo, "").takeIf { record.caption.isNotEmpty() || record.replyTo != 0L }
         }
+        // The entry leaving the outbox removes the record and the cached copy.
+        val carried = current.fileOutbox(record.token).discard(record.referenceId) ?: return null
+        if (carried.movedTo.isEmpty()) return carried
+        records.update { list ->
+            list.map { if (it.referenceId == carried.movedTo) it.copy(caption = carried.caption, replyTo = carried.replyToId) else it }
+        }
+        persist()
+        publish()
+        return null
+    }
+
+    /**
+     * Conversations that are not the user's any more: what could not be sent into them goes, with its copies (its
+     * bubble, and so its Delete, is only drawn there). What is on its way has its own end first.
+     */
+    fun dropGone(session: TalkSession, gone: (token: String) -> Boolean) {
+        val account = account(session)
+        val over = _pending.value.filter { !it.state.active && gone(it.token) }.mapTo(HashSet()) { it.id }
+        if (over.isEmpty()) return
+        for (record in records.value) if (record.id in over && record.account == account) discard(record.id)
     }
 
     // ---- after a restart -----------------------------------------------------------------
+
+    /** [session] is the one now: nothing another account left here is shown, or sent, in its name. */
+    fun opened(session: TalkSession) {
+        val account = account(session)
+        remove(records.value.filter { it.account != account }.mapTo(HashSet()) { it.id })
+        val key = ComposerDrafts.accountOf(session)
+        trays.dropWhere { it.account != key }
+    }
+
+    /**
+     * The server has these messages of [token], by what they were sent as ([refs]): a file an earlier run left
+     * behind that is among them was sent (the process ended before it heard of that), and is done.
+     */
+    fun arrived(token: String, refs: Set<String>) {
+        val done = records.value.filter {
+            it.token == token && it.referenceId.isNotEmpty() && it.referenceId in refs &&
+                it.referenceId !in live.value && it.referenceId !in sentHere && it.id !in resuming.value
+        }
+        if (done.isNotEmpty()) remove(done.mapTo(HashSet()) { it.id })
+    }
 
     /**
      * Files left over from a process that died: send them again. Called by the worker when the
@@ -382,13 +374,16 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
                         lost.update { it + record.id }
                         continue
                     }
+                    val smaller = record.smaller ?: smallerNow(record, file)
                     val key = outbox.send(
-                        listOf(FileToSend(FileByteSource(file), record.name, record.mimeType, tag = record.path, voiceMessage = record.voiceMessage)),
+                        listOf(toSend(record.path, record.name, record.mimeType, record.voiceMessage, smaller)),
                         caption = record.caption,
                         threadId = record.threadId,
+                        silent = record.silent,
+                        replyToId = record.replyTo,
                     ).first()
                     sentHere.add(key)
-                    records.update { list -> list.map { if (it.id == record.id) it.copy(referenceId = key) else it } }
+                    records.update { list -> list.map { if (it.id == record.id) it.copy(referenceId = key, smaller = smaller) else it } }
                 }
                 persist()
                 reconcile(token, outbox.entries.value)
@@ -400,6 +395,13 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         if (_pending.value.any { it.state.active }) UploadWorker.start(appContext)
     }
 
+    /** What [enqueue] would say of it now. A file that cannot be read is not sent as it is. */
+    private suspend fun smallerNow(record: UploadRecord, file: File): Boolean {
+        if (record.voiceMessage || prefs.sendOriginal) return false
+        if (VideoShrink.isVideo(record.mimeType)) return true
+        return withContext(Dispatchers.IO) { runCatching { Mp4Metadata.needsCleaning(file) }.getOrDefault(true) }
+    }
+
     /** The account is gone (sign-out): nothing of it may be sent later. */
     fun clearAll() {
         watchers.values.forEach { it.cancel() }
@@ -409,10 +411,10 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
         sentHere.clear()
         lost.value = emptySet()
         records.value = emptyList()
-        preparing.value = emptyList()
         persist()
         publish()
-        preparingJobs.values.toList().forEach { it.cancel() }
+        trays.clear()
+        notice.value = null
         scope.launch(Dispatchers.IO) { Staging.clearAll(appContext) }
     }
 
@@ -461,23 +463,30 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
             val state = when {
                 entry != null -> when (val s = entry.state) {
                     FileSendState.Queued -> UploadState.Queued
+                    is FileSendState.Preparing -> UploadState.Compressing(s.fraction)
                     is FileSendState.Uploading -> UploadState.Uploading(s.fraction)
                     FileSendState.Sharing -> UploadState.Sharing
-                    is FileSendState.Failed -> UploadState.Failed(s.error.userMessage())
+                    is FileSendState.Failed ->
+                        if (s.unprepared) UploadState.Failed("Location can't be removed.", original = true) else UploadState.Failed(s.error.userMessage())
                 }
                 r.id in lost.value -> UploadState.Lost
                 r.id in resuming.value -> UploadState.Queued
                 else -> UploadState.Interrupted
             }
-            PendingUpload(r.id, r.token, entry?.threadId ?: r.threadId, r.name, r.size, r.mimeType, r.path, r.caption, state)
+            // A video made smaller has another size, and maybe another ending, than what was picked.
+            val made = entry?.takeIf { r.smaller == true }
+            PendingUpload(
+                r.id, r.token, entry?.threadId ?: r.threadId, made?.name ?: r.name, made?.size ?: r.size, r.mimeType, r.path, r.caption, state,
+                r.referenceId,
+            )
         }
-        _pending.value = fromRecords + preparing.value
+        _pending.value = fromRecords
     }
 
     private fun readStore(): List<UploadRecord> = try {
         if (store.isFile) json.decodeFromString<List<UploadRecord>>(store.readText()) else emptyList()
     } catch (e: Exception) {
-        Log.w(TAG, "the list of pending uploads could not be read", e)
+        Log.w(TAG, "the list of pending uploads could not be read (${e::class.simpleName})")
         emptyList()
     }
 
@@ -498,7 +507,7 @@ class UploadManager(context: Context, private val scope: CoroutineScope, private
                         }
                     }
                 } catch (e: IOException) {
-                    Log.w(TAG, "the list of pending uploads could not be written", e)
+                    Log.w(TAG, "the list of pending uploads could not be written (${e::class.simpleName})")
                 }
             }
         }

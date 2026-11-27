@@ -13,9 +13,9 @@ The full text is in `LICENSE`.
 - **AndroidX / Jetpack** (The Android Open Source Project): Activity, Annotation, AppCompat,
   Arch Core, Autofill, Browser, Collection, Compose (Runtime, UI, Foundation, Animation,
   Material, Material 3, Material Icons), Concurrent, Core, Core Telecom, CustomView, DataStore, Emoji2,
-  ExifInterface, Graphics, Interpolator, Lifecycle, Media3 (ExoPlayer, OkHttp data source,
-  UI), Navigation, NavigationEvent, ProfileInstaller, RecyclerView, Room, SavedState, SQLite,
-  Startup, Tracing, VectorDrawable, VersionedParcelable, Window, WorkManager
+  ExifInterface, Graphics, Interpolator, Lifecycle, Media3 (Effect, ExoPlayer, Muxer, OkHttp data
+  source, Transformer, UI), Navigation, NavigationEvent, ProfileInstaller, RecyclerView, Room,
+  SavedState, SQLite, Startup, Tracing, VectorDrawable, VersionedParcelable, Window, WorkManager
 - **Kotlin** standard library, **kotlinx.coroutines**, **kotlinx.serialization**,
   **kotlinx-io**, **kotlinx-datetime** and other JetBrains Kotlin libraries (JetBrains s.r.o.
   and contributors), including the JetBrains Compose Multiplatform and AndroidX Lifecycle /

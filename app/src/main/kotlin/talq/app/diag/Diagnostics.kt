@@ -22,9 +22,15 @@ import kotlinx.coroutines.withContext
 import talq.app.AppContainer
 import talq.app.Brand
 import talq.app.BuildConfig
+import talq.app.SessionState
 import talq.app.call.TurnProbe
+import talq.app.push.AlertState
+import talq.app.push.NotificationKind
 import talq.app.push.PushStatus
+import talq.app.push.TalqNotifications
 import talq.app.shift.ErpLink
+import talq.app.ui.common.WAITING_FOR_SERVER
+import talq.app.ui.common.technical
 import talq.app.ui.common.userMessage
 import talq.core.TalkError
 import talq.core.call.HpbConnection
@@ -74,7 +80,12 @@ class Diagnostics(private val context: Context, private val container: AppContai
         networkChecks().forEachIndexed { i, c -> put("net$i", c) }
         shiftCheck()?.let { put("shift", it) }
         if (session == null) {
-            put("server", Check(SERVER, "Server", "Not signed in", Health.Warn))
+            val why = when (val state = container.sessionState.value) {
+                is SessionState.Unreachable -> "${state.error.userMessage()} ${state.error.technical()}"
+                SessionState.Loading -> WAITING_FOR_SERVER
+                else -> "Not signed in"
+            }
+            put("server", Check(SERVER, "Server", why, Health.Warn))
             return
         }
         put("server", Check(SERVER, "Server", "Checking…", Health.Running))
@@ -155,7 +166,8 @@ class Diagnostics(private val context: Context, private val container: AppContai
             ).joinToString(" · ")
             Check(SERVER, "Server $host", "Reachable, $ms ms · $versions · signed in as $account", if (ms < 1500) Health.Good else Health.Warn)
         } catch (e: TalkError) {
-            Check(SERVER, "Server $host", "Not reachable: ${e.userMessage()} (signed in as $account)", Health.Bad)
+            val ms = SystemClock.elapsedRealtime() - started
+            Check(SERVER, "Server $host", "Not reachable after $ms ms: ${e.technical()} (signed in as $account)", Health.Bad)
         }
     }
 
@@ -179,12 +191,13 @@ class Diagnostics(private val context: Context, private val container: AppContai
         }
         val manager = NotificationManagerCompat.from(context)
         val allowed = manager.areNotificationsEnabled()
-        val messagesBlocked = manager.notificationChannels
-            .filter { it.id == "messages" || it.id.startsWith("messages_") }
-            .any { it.importance == NotificationManager.IMPORTANCE_NONE }
+        val directOff = TalqNotifications.alertState(context, NotificationKind.Direct) == AlertState.Off
+        val otherOff = TalqNotifications.alertState(context, NotificationKind.Other) == AlertState.Off
         val notifications = when {
             !allowed -> Check(PUSH, "Notifications", "Blocked for this app", Health.Bad, DiagAction.Notifications)
-            messagesBlocked -> Check(PUSH, "Notifications", "Allowed, but the Messages channel is switched off", Health.Bad, DiagAction.Notifications)
+            directOff && otherOff -> Check(PUSH, "Notifications", "Allowed, but all messages are off", Health.Bad, DiagAction.Notifications)
+            directOff -> Check(PUSH, "Notifications", "Allowed, but direct messages and mentions are off", Health.Bad, DiagAction.Notifications)
+            otherOff -> Check(PUSH, "Notifications", "Allowed, but other messages are off", Health.Warn, DiagAction.Notifications)
             else -> Check(PUSH, "Notifications", "Allowed", Health.Good, DiagAction.Notifications)
         }
         val power = context.getSystemService(PowerManager::class.java)
@@ -305,7 +318,8 @@ class Diagnostics(private val context: Context, private val container: AppContai
             val mcu = (connection.state.value as? HpbState.Ready)?.features?.contains("mcu") == true
             Check(CALLS, "Signaling server $host", "Signed in in $ms ms" + if (mcu) "" else " · no media server (mcu) offered", if (mcu) Health.Good else Health.Bad)
         } catch (e: TalkError) {
-            Check(CALLS, "Signaling server $host", "Could not sign in: ${e.userMessage()}", Health.Bad)
+            val ms = SystemClock.elapsedRealtime() - started
+            Check(CALLS, "Signaling server $host", "Could not sign in after $ms ms: ${e.technical()}", Health.Bad)
         } finally {
             runCatching { connection.close(sayBye = true) }
             scope.cancel()

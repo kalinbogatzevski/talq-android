@@ -11,6 +11,8 @@ package talq.core.model
  * `group/...`, `guest/...`, `federated_user/...`, `all`). Decided difference: desktop leaves the
  * quotes off a plain id; here they are always there, so the box can tell an inserted mention from
  * typed text and draw it as a name (the same form the app's edit and forward already write).
+ * A bot is the exception: its name is no id the server knows, so quotes would stay in the message
+ * everyone reads. It goes in as desktop writes it ([mentionToken]).
  */
 
 /** TalQ for desktop's pause after the last key before it asks (`m_mentionDebounce`). */
@@ -25,7 +27,8 @@ const val MENTION_ROWS = 6
 /**
  * One suggestion of `GET chat/{token}/mentions`: [id] loads the avatar and status, [mentionId] (only
  * with `federation-v1`) is what goes into the text, [label] the name, [source] `users`, `groups`,
- * `guests`, `emails`, `federated_users`, `teams` or `calls` (everyone in the conversation, id `all`).
+ * `guests`, `emails`, `federated_users`, `teams` or `calls` (everyone in the conversation, id `all`);
+ * [BOTS] for one of the conversation's bots ([botMentions]; its id is its name).
  * [status] etc. only for a user with a status, when asked with `includeStatus`; [details] only on
  * some rows (the server's subline).
  */
@@ -46,11 +49,33 @@ data class MentionCandidate(
 
     val isUser: Boolean get() = source == "users"
 
+    val isBot: Boolean get() = source == BOTS
+
     val name: String get() = label.ifEmpty { id }
 
     /** Unique in one answer: a group and a user may share an id. */
     val key: String get() = "$source:$id"
+
+    companion object {
+        const val BOTS = "bots"
+    }
 }
+
+/** A bot of a conversation (`TalkBot` of `GET bot/{token}`); desktop's `BotInfo`. */
+data class RoomBot(val id: Long, val name: String, val state: Int) {
+    /** State 1 (constants.md "Bot states"): the bot takes part in the conversation. */
+    val isEnabled: Boolean get() = state == 1
+}
+
+/**
+ * The enabled bots whose name holds [query] (any case; all of them for an empty one), as desktop's
+ * composer lists them after the server's own suggestions (`fetchMentionsDebounced`).
+ */
+fun botMentions(bots: List<RoomBot>, query: String): List<MentionCandidate> =
+    bots.filter { it.isEnabled && it.name.isNotBlank() && it.name.contains(query, ignoreCase = true) }
+        .map { MentionCandidate(id = it.name, mentionId = "", label = it.name, source = MentionCandidate.BOTS) }
+        .filter { isMentionable(it) }
+        .distinctBy { it.key }
 
 /** A suggestion that can go into the text: an id that the quoted form can carry. */
 fun isMentionable(c: MentionCandidate): Boolean {
@@ -86,8 +111,15 @@ fun mentionQueryAt(text: String, caret: Int): MentionQuery? {
     return MentionQuery(i, caret, end, text.substring(i + 1, caret))
 }
 
-/** The text of [c]'s mention: `@"<mention id>"`. */
-fun mentionToken(c: MentionCandidate): String = "@\"${c.wireId}\""
+/** Desktop's `simple` ids (`applyMentionCompletion`): no quotes needed. */
+private val SIMPLE_ID = Regex("[A-Za-z0-9._-]+")
+
+/**
+ * The text of [c]'s mention: `@"<mention id>"`. A bot's is desktop's: `@name`, in quotes only when
+ * the name holds anything but letters, digits and `. _ -`.
+ */
+fun mentionToken(c: MentionCandidate): String =
+    if (c.isBot && SIMPLE_ID.matches(c.wireId)) "@${c.wireId}" else "@\"${c.wireId}\""
 
 /**
  * [text] with the "@word" of [q] (through its end, not only up to the caret) replaced by [c]'s
@@ -152,4 +184,70 @@ fun mentionNamesOf(m: ChatMessage): Map<String, String> {
         if (id.isNotEmpty() && p.name.isNotBlank()) out[id] = p.name
     }
     return out
+}
+
+/**
+ * Whether [parameters] (of a message, or of a notification about one) mention [userId] by name: the
+ * `user` arm of TalQ for desktop's `mentionsUser` (`src/core/ToastGatePolicy.h`). @all (`call`), a group
+ * and a team are no name, and somebody on another server with the same id is somebody else.
+ */
+fun mentionsByName(parameters: Map<String, RichObject>, userId: String): Boolean =
+    userId.isNotEmpty() && parameters.values.any {
+        it.key.startsWith("mention-") && it.type == "user" && it.id == userId && it.value("server").isEmpty()
+    }
+
+/**
+ * Somebody in a conversation (`GET room/{token}/participants`, the fields used here). [actorType]:
+ * `users`, `groups`, `guests`, `emails`, `circles`, `federated_users`... [attendeeId] is what removing,
+ * promoting and demoting name (0 = not sent); [participantType] see [ParticipantType]; [status] only when
+ * asked with `includeStatus`, for users, and not in a very large conversation. What may be done with them
+ * is in Members.kt.
+ */
+data class RoomParticipant(
+    val actorType: String,
+    val actorId: String,
+    val displayName: String,
+    val attendeeId: Long = 0L,
+    val participantType: Int = 0,
+    val status: String = "",
+) {
+    /** Unique in one conversation. */
+    val key: String get() = "$actorType/$actorId"
+
+    /** A group or a team (`circles`): it stands for its people, who are in the list too. */
+    val isCollective: Boolean get() = actorType == "groups" || actorType == "circles" || actorType == "teams"
+
+    /** Somebody without an account (a public link, an invitation by e-mail). */
+    val isGuest: Boolean get() = actorType == "guests" || actorType == "emails"
+
+    /** Owner, moderator, or a guest with moderator rights. */
+    val isModerator: Boolean
+        get() = participantType == ParticipantType.OWNER || participantType == ParticipantType.MODERATOR ||
+            participantType == ParticipantType.GUEST_MODERATOR
+
+    /** The name to show. A guest without a name, a team and a phone have an id that says nothing. */
+    val name: String
+        get() = displayName.trim().ifEmpty {
+            when (actorType) {
+                "guests", "emails" -> "Guest"
+                "circles", "teams" -> "Team"
+                "phones" -> "Phone"
+                else -> actorId
+            }
+        }
+
+    /**
+     * The id a mention of them carries (the forms desktop's `TaskListLogic.h` lists, and
+     * `createMentionString` for a federated user); empty for any other kind.
+     */
+    val mentionId: String
+        get() = when (actorType) {
+            "users" -> actorId
+            "groups" -> "group/$actorId"
+            "circles", "teams" -> "team/$actorId"
+            "emails" -> "email/$actorId"
+            "guests" -> "guest/$actorId"
+            "federated_users" -> "federated_user/$actorId"
+            else -> ""
+        }
 }

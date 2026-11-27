@@ -55,8 +55,9 @@ data class DeepLink(
          * launcher entry), so any app on the phone can send it an intent; only intents carrying
          * this secret (the ones our own notifications build) are treated as deep links.
          * Kept in app-private storage so notification taps still work after process death.
+         * Conversation shortcuts key their ids with it too (talq.app.share.ChatShortcuts).
          */
-        private fun installSecret(context: Context): String {
+        internal fun installSecret(context: Context): String {
             cachedSecret?.let { return it }
             synchronized(this) {
                 cachedSecret?.let { return it }

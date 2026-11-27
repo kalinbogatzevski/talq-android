@@ -9,9 +9,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import talq.app.SessionState
@@ -57,9 +55,12 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
     /** The account's folders file exists but could not be read at sign-in: folders are off for this session. */
     val loadFailed: StateFlow<Boolean> = _loadFailed.asStateFlow()
 
+    /** Folders opened and closed while the account is being checked ([showSaved]): id (empty = Other) to closed. */
+    private val held = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
     /** Everything the conversation list needs, in one value. */
-    val ui: StateFlow<FolderUi> = combine(store.state, store.status, _loadFailed, appearance.showFolders) { s, st, failed, show ->
-        FolderUi(state = s, attached = st.attached, readOnly = st.readOnly, loadFailed = failed, showFolders = show)
+    val ui: StateFlow<FolderUi> = combine(store.state, store.status, _loadFailed, appearance.showFolders, held) { s, st, failed, show, held ->
+        FolderUi(state = s.withHeld(held), attached = st.attached, readOnly = st.readOnly, loadFailed = failed, showFolders = show)
     }.stateIn(scope, SharingStarted.Eagerly, FolderUi(showFolders = appearance.showFolders.value))
 
     private var attachedSession: TalkSession? = null
@@ -75,9 +76,26 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
      * The files stay on the device: the folders come back at the next sign-in to the same account.
      */
     suspend fun run(states: StateFlow<SessionState>) {
-        states.map { (it as? SessionState.SignedIn)?.session }.distinctUntilChanged().collect { session ->
-            if (session == null) detachAll() else attachTo(session)
+        states.collect { state ->
+            when (state) {
+                is SessionState.SignedIn -> attachTo(state.session)
+                SessionState.SignedOut -> detachAll()
+                // Being checked, or not reached: what [showSaved] shows stays.
+                else -> Unit
+            }
         }
+    }
+
+    /**
+     * The saved list of an account that is not checked yet is put on screen: its folders with it. Only to look
+     * at: nothing of them is changed or synced before [run] has the account's session. The sync trusts its
+     * record of the file only while it is told of every write, so a change made earlier would cost that trust;
+     * a folder opened or closed meanwhile is [held] and becomes a change like any other then.
+     */
+    fun showSaved(server: String, userId: String) {
+        if (attachedSession != null || store.isAttached) return
+        val key = accountScopeKey(server, userId)
+        if (key.isNotEmpty()) store.attach(key)
     }
 
     private fun attachTo(session: TalkSession) {
@@ -94,7 +112,8 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
         sync.detach()
         _loadFailed.value = false
         attachedSession = null
-        if (!store.attach(key)) {
+        // Read once: the saved list may show them already.
+        if (!(store.isAttached && store.scopeKey == key) && !store.attach(key)) {
             // Once per sign-in, no retry timer: Settings says so, so folders are not simply "gone".
             Log.w(TAG, "the folders file of this account could not be opened; folders stay off for this session")
             _loadFailed.value = true
@@ -102,12 +121,15 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
         }
         attachedSession = session
         sync.attach { session.folderDav }
+        for ((id, closed) in held.value) if (id.isEmpty()) store.setOtherCollapsed(closed) else store.setCollapsed(id, closed)
+        held.value = emptyMap()
     }
 
     private fun detachAll() {
         dropPendingReveal()
         sync.detach()
         store.detach()
+        held.value = emptyMap()
         _loadFailed.value = false
         attachedSession = null
     }
@@ -121,6 +143,7 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
         dropPendingReveal()
         sync.signedOut()
         store.detach()
+        held.value = emptyMap()
         _loadFailed.value = false
         attachedSession = null
     }
@@ -140,7 +163,7 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
      * read-only store, already MAX_FOLDERS folders), or null when a name is worth asking for.
      */
     fun createRefusal(): FolderResult? = when {
-        !store.isAttached -> FolderResult.NotAttached
+        !editable -> FolderResult.NotAttached
         store.isReadOnly -> FolderResult.ReadOnly
         store.state.value.folders.size >= MAX_FOLDERS -> FolderResult.TooMany
         else -> null
@@ -153,6 +176,7 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
      * MAX_FOLDER_NAME_CHARS characters (worth a word on screen).
      */
     fun create(name: String, fileToken: String? = null): FolderCreated {
+        if (!editable) return FolderCreated(FolderResult.NotAttached)
         val firstFolder = store.state.value.folders.isEmpty()
         val change = store.createFolder(name)
         if (change.result != FolderResult.Ok) return FolderCreated(change.result)
@@ -166,31 +190,50 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
      * open ([FOLDER_REMOVED_ELSEWHERE_TEXT]). A cut name is worth a word also on Unchanged (a long
      * name whose first 40 characters are the current one): see [nameShortened].
      */
-    fun rename(id: String, name: String): FolderResult = store.renameFolder(id, name)
+    fun rename(id: String, name: String): FolderResult = edit { store.renameFolder(id, name) }
 
     /** No confirmation: its chats go back to Other. */
-    fun delete(id: String): FolderResult = store.deleteFolder(id)
+    fun delete(id: String): FolderResult = edit { store.deleteFolder(id) }
 
-    fun moveUp(id: String): FolderResult = store.moveFolder(id, -1)
+    fun moveUp(id: String): FolderResult = edit { store.moveFolder(id, -1) }
 
-    fun moveDown(id: String): FolderResult = store.moveFolder(id, +1)
+    fun moveDown(id: String): FolderResult = edit { store.moveFolder(id, +1) }
 
     /** "Sort folders A to Z": Unchanged when they already are. */
-    fun sortAZ(): FolderResult = store.sortFoldersByName()
+    fun sortAZ(): FolderResult = edit { store.sortFoldersByName() }
 
     /** File [token] in [folderId]; null (or empty) takes it out of its folder. */
-    fun assign(token: String, folderId: String?): FolderResult = store.assign(token, folderId ?: "")
+    fun assign(token: String, folderId: String?): FolderResult = edit { store.assign(token, folderId ?: "") }
+
+    /** The account's session is there: before it the folders are only shown ([showSaved]). */
+    private val editable: Boolean get() = store.isAttached && attachedSession != null
+
+    private inline fun edit(change: () -> FolderResult): FolderResult = if (editable) change() else FolderResult.NotAttached
 
     /** Open or close a folder (a header tap). Saved, and synced when sync is on. */
     fun toggle(id: String): FolderResult {
-        val s = store.state.value
+        val s = store.state.value.withHeld(held.value)
         val idx = folderIndexOf(s, id)
         if (idx < 0) return if (store.isAttached) FolderResult.NotFound else FolderResult.NotAttached
-        return store.setCollapsed(id, !s.folders[idx].collapsed)
+        return if (editable) store.setCollapsed(id, !s.folders[idx].collapsed) else hold(id, !s.folders[idx].collapsed)
     }
 
     /** Open or close "Other". */
-    fun toggleOther(): FolderResult = store.setOtherCollapsed(!store.state.value.otherCollapsed)
+    fun toggleOther(): FolderResult {
+        val closed = store.state.value.withHeld(held.value).otherCollapsed
+        return if (editable) store.setOtherCollapsed(!closed) else hold("", !closed)
+    }
+
+    private fun hold(id: String, closed: Boolean): FolderResult {
+        if (!store.isAttached) return FolderResult.NotAttached
+        held.value += id to closed
+        return FolderResult.Ok
+    }
+
+    private fun FolderState.withHeld(held: Map<String, Boolean>): FolderState = if (held.isEmpty()) this else copy(
+        folders = folders.map { f -> held[f.id]?.let { f.copy(collapsed = it) } ?: f },
+        otherCollapsed = held[""] ?: otherCollapsed,
+    )
 
     /**
      * Opening a chat that sits in a closed folder (or in a closed Other) opens that folder, so the
@@ -199,7 +242,7 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
      * the list shows: for one it does not, opening its section would show nothing.
      */
     fun reveal(token: String): FolderResult {
-        if (!appearance.showFolders.value) return FolderResult.Unchanged
+        if (!appearance.showFolders.value || !editable) return FolderResult.Unchanged
         val s = store.state.value
         if (s.folders.isEmpty()) return FolderResult.Unchanged
         val folderId = folderOf(s, token)   // empty: unfiled, or filed in a folder that is gone (Other)
@@ -209,22 +252,22 @@ class FolderController(context: Context, private val scope: CoroutineScope, priv
     }
 
     /**
-     * [reveal] for a chat opened from a notification, only once the list shows it: at once when the
-     * list of [session] has answered; after a cold start, when it first answers, if [session] is
-     * still the attached one. A chat the list does not show (one the user left) is left alone, as
-     * desktop's reveal does: opening Other for it would show nothing and be synced to every device.
-     * A newer link, or a sign-out, drops a reveal still waiting.
+     * [reveal] for a chat opened from a notification, only once the list shows it ([listed] is asked): at
+     * once when the list of [session] has answered; after a cold start, when it first answers, if
+     * [session] is still the attached one. A chat the list does not show (one the user left, or one its
+     * "Show" hides) is left alone, as desktop's reveal does: opening Other for it would show nothing and
+     * be synced to every device. A newer link, or a sign-out, drops a reveal still waiting.
      */
-    fun revealWhenListed(session: TalkSession, token: String) {
+    fun revealWhenListed(session: TalkSession, token: String, listed: () -> Boolean) {
         dropPendingReveal()
         if (session.rooms.state.value.loaded) {
-            if (session.rooms.room(token) != null) reveal(token)
+            if (listed()) reveal(token)
             return
         }
         pendingReveal = scope.launch {
             session.rooms.state.first { it.loaded }
             pendingReveal = null
-            if (attachedSession === session && session.rooms.room(token) != null) reveal(token)
+            if (attachedSession === session && listed()) reveal(token)
         }
     }
 

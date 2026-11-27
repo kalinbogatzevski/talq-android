@@ -150,7 +150,7 @@ class TalkFiles(
     private val origin = Url(client.serverUrl)
 
     /** Same engine and settings as the API client, but a redirect is handed back, not followed. */
-    private val raw: HttpClient = client.httpClient.config { followRedirects = false }
+    private val raw: HttpClient by lazy { client.httpClient.config { followRedirects = false } }
 
     private val davUser get() = userId.encodeURLPathPart()
 

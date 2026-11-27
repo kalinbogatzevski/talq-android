@@ -3,6 +3,8 @@ package talq.core.net
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.engine.okhttp.OkHttp
+import java.net.ConnectException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 internal actual fun platformHttpClient(config: HttpClientConfig<*>.() -> Unit): HttpClient =
@@ -13,3 +15,7 @@ internal actual fun platformWebSocketHttpClient(pingMillis: Long, configure: Htt
         engine { config { pingInterval(pingMillis, TimeUnit.MILLISECONDS) } }
         configure()
     }
+
+// Ktor's ConnectTimeoutException is a ConnectException.
+internal actual fun neverLeftThePhone(failure: Throwable): Boolean =
+    failure is UnknownHostException || failure is ConnectException

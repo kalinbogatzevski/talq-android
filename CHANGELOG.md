@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.10.0
+
+- **Opens on your conversations at once**, also offline: the list as you last saw it, kept encrypted on the
+  phone until you sign out. One line under the header says whether it is being updated or you are offline.
+- **Chats open on their messages at once**, also offline: the newest hundred or so of the chats you used last
+  and of their topics, kept encrypted too. Never those of sensitive conversations or of another server.
+- **Jump to a message, however far back**: a quote, a notification or "Show in chat" opens the messages around
+  it, and "Jump to newest" brings you back. Nothing counts as read meanwhile.
+- **Unsent messages go by themselves** once the app is back online, also when you open it again later. The chat
+  is looked through for them first; one that stays unclear waits for Retry. Until then the list says "Not sent:".
+- **Topic line**: "+", then General, then the topics. The tab that mixed all topics is gone; unread messages in
+  an older topic get a tab of their own, and a chat without topics looks as before.
+- **Starting a topic**: "New topic" is also the first row of All topics, and what you typed for one waits as a tab
+  of its own until it is sent.
+- **Topic marks and menus**: "@" is red-orange when someone mentions you and amber for everyone, the muted bell
+  shows on the open topic only, and touch and hold (or a right-click) in All topics opens a topic's menu.
+- **Muted messages have a grey count of their own** beside the coloured one: in the list, on folder headers, in
+  the topic line and in All topics.
+- **Sort and filter the list** with the button beside the search field: by recent activity, unread first or name;
+  only unread, favorites, direct messages, groups or archived. A chip says so; tap it to show all again.
+- **A menu for each chat**: touch and hold it in the list (or right-click) for read or unread, favourites,
+  notifications, archive, important, call, folder and leave. Leaving a group as its only member says first that
+  this deletes it. Writing in an archived chat brings it back.
+- **Members of a group**: tap its name (or ⋮ > Members) to see who is in it, with presence and roles. Moderators
+  add people, groups and teams, remove them, and make or unmake moderators.
+- **"Draft:" in the list opens the tab that holds the text.**
+- **Files wait above the box until you send**: photos, videos and files show with an x, "+" adds more and the box
+  is their caption. They stay with their chat, also after a restart.
+- **Drop and paste**: drag files onto a chat, paste a picture or file, or pick a GIF or sticker from the keyboard.
+- **A text that is too long is no longer cut**: one line says how much is over, and Send waits.
+- **Videos are made smaller before they are sent** (up to 1280 px) where that helps; "Original" sends them as
+  they are.
+- **Videos lose their location before they are sent** (MP4, MOV, 3GP, Matroska, WebM), and so do M4A sound files
+  that name a place. One where that can't be done waits, and you can send the original.
+- **Typing**: "typing…" under the name in a one-to-one chat, and who is typing above the box in a group, with
+  Talk's high-performance backend. Others see yours while the chat is open, when your Talk settings share it.
+- **Bots in the @ list**, after the people, where you may see them. Scheduled messages show names in their edit box.
+- **Delete several messages at once**; moderators can delete other people's. Edit and Delete hide where the server
+  would not take them, and a quote follows its message when that is edited or deleted.
+- **Reply, or mark as read, in a message notification**, also with the app closed. A reply goes into its topic, and
+  the notification says how it stands until it is in the chat.
+- **An alert of its own for direct messages and mentions**: one-to-one chats, your name, and answers to you. The rest
+  is "Other messages"; Settings > Notifications opens Android's page for each.
+- **Recent conversations in the share sheet** of other apps (Android 10 and later) and under touch and hold on the
+  app's icon; their notifications show among the phone's conversations (Android 11 and later).
+- **"Notifications are off"** stays dismissed until something changes.
+- **Signing out before the server has answered** still tries to tell it, for five seconds at most; the sign-in
+  screen says when it could not.
+- **Diagnostics and the start screen** say what is underneath when the server is not reached.
+- **The privacy text** (`PRIVACY.md`) is written anew: what stays on the phone, what goes where, what signing out deletes.
+- **Fixed**: "Send later" and the paperclip no longer show in conversations on another server, where they cannot
+  work; on a tablet, Esc no longer hides the app while a conversation is open.
+- **Fixed**: a topic that is gone gives its unsent text back to the conversation, a cleared history empties the open
+  chat, reading General does not mark a topic's new message as read, and General finds its older messages in a busy
+  chat.
+- **Fixed**: older messages that could not be loaded say so, with "Try again", instead of reloading without end.
+- **Fixed**: a refused message has "Edit", and one whose quoted message is gone can be sent without it; a photo asks
+  for the camera first and is not lost when Android closes the app meanwhile; a file keeps its reply after a restart.
+- **Fixed**: only messages that were on screen count as read, also when many come at once; one marked unread
+  elsewhere is unread here too; answering a notification leaves those of other topics.
+- **Fixed**: a chat that is closed to you and messages that disappear leave the phone, notifications do not name
+  sensitive conversations, and a phone removed on the server forgets all it kept.
+
 ## 0.9.2
 
 - **Conversation header**: the name gets the room; on a narrow screen Video call, Mute topic and

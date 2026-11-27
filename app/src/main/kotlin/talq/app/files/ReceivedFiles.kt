@@ -128,7 +128,8 @@ class ReceivedFiles(
             } catch (e: TalkError) {
                 notice.value = FileNotice("Couldn't get ${label(file)}. ${e.userMessage()}")
             } catch (e: Exception) {
-                Log.w(TAG, "file action failed", e)
+                // Its text may hold the file's name.
+                Log.w(TAG, "file action failed (${e::class.simpleName})")
                 notice.value = FileNotice("That didn't work for ${label(file)}.")
             }
         }
@@ -229,7 +230,7 @@ class ReceivedFiles(
                 throw e
             } catch (e: Exception) {
                 // An image type the gallery does not take: it still fits in Downloads.
-                Log.w(TAG, "not accepted as a picture", e)
+                Log.w(TAG, "not accepted as a picture (${e::class.simpleName})")
             }
         }
         insert(file, local, MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_DOWNLOADS)

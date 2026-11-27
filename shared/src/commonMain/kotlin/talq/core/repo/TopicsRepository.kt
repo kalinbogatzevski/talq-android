@@ -73,9 +73,13 @@ class TopicsRepository internal constructor(
         var needRefresh = false
         for (m in batch) {
             if (m.systemMessage == "thread_renamed" || m.systemMessage == "thread_created") needRefresh = true
+            // The chat's history was deleted, the topics with it.
+            if (m.systemMessage == "history_cleared") needRefresh = true
             if (m.isUpdateSignal || m.topicId == 0L) continue
             val known = topic(m.topicId)
             if (known == null) {
+                // Perhaps the room's first: said at once, the list follows.
+                session.noteTopics(token, true)
                 needRefresh = true
             } else if (m.id > known.thread.lastMessageId && m.id != known.id) {
                 put(

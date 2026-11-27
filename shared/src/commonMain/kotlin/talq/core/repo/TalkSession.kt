@@ -5,7 +5,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,6 +28,8 @@ import talq.core.model.Room
 import talq.core.model.TalkCapabilities
 import talq.core.model.UserInfo
 import talq.core.net.newTalkHttpClient
+import kotlin.concurrent.Volatile
+import kotlin.time.TimeSource
 
 /** Loading state shared by the list repositories. */
 data class LoadState(
@@ -45,6 +49,8 @@ class TalkSession private constructor(
     val client: TalkClient,
     val capabilities: TalkCapabilities,
     val user: UserInfo,
+    /** The server has answered for this account. False: see [unchecked]. */
+    val checked: Boolean = true,
 ) {
     internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -52,6 +58,9 @@ class TalkSession private constructor(
     internal val waker = Waker()
 
     val rooms = RoomsRepository(this)
+
+    /** What the user does to a conversation from its row in the list. */
+    val roomActions = RoomActions(this)
 
     /** Uploads, downloads and shared items of this account. */
     val files = TalkFiles(client, user.userId, capabilities.attachments)
@@ -69,6 +78,111 @@ class TalkSession private constructor(
 
     internal fun fileOutboxIfCreated(token: String): FileOutbox? = fileOutboxes.value[token]
 
+    // ---------------------------------------------------------------- unsent texts (see TextOutbox)
+
+    private val textOutboxes = MutableStateFlow<Map<String, TextOutbox>>(emptyMap())
+
+    /** The texts of one room the server has not confirmed: its one sender. */
+    internal fun textOutbox(token: String): TextOutbox = getOrCreate(textOutboxes, token) { TextOutbox(this, token) }
+
+    internal fun textOutboxIfCreated(token: String): TextOutbox? = textOutboxes.value[token]
+
+    /** Sending texts again: one room at a time, and not while the server does not answer. */
+    internal val resend = ResendGate()
+
+    private val _unsent = MutableStateFlow<Map<String, OutboxMessage>>(emptyMap())
+
+    /** Rooms with a text that is not sent (FAILED: waiting for a try, or for the user): token -> the newest one. */
+    val unsent: StateFlow<Map<String, OutboxMessage>> = _unsent.asStateFlow()
+
+    /** The unsent texts of [token] changed: every view of the room shows it at once. */
+    internal fun outboxChanged(token: String) {
+        for ((key, repo) in chats.value) if (key.first == token) repo.syncOutbox()
+        noteUnsent(token)
+    }
+
+    private fun noteUnsent(token: String) {
+        fun newest() = textOutboxIfCreated(token)?.shown?.lastOrNull { it.status == OutboxStatus.FAILED }
+        do {
+            val failed = newest()
+            _unsent.update { if (failed == null) it - token else it + (token to failed) }
+            // Changed meanwhile on another thread (its message arrived): what was just noted must not stay.
+        } while (newest() != failed)
+    }
+
+    /** One of the user's texts is in the chat as [m]: the views take it in, its pending row goes with it. */
+    internal fun arrivedOwn(token: String, m: ChatMessage) {
+        for ((key, repo) in chats.value) if (key.first == token) repo.arrivedOwn(m)
+        noteUnsent(token)
+    }
+
+    /**
+     * The newest message id of the room known here, 0 = none: a message stored after now has a larger
+     * one. The list's own last message only for a room on this server (elsewhere its id is not checked).
+     */
+    internal fun newestKnown(token: String): Long {
+        val loaded = chats.value.maxOfOrNull { (key, repo) -> if (key.first == token) repo.newestHeld else 0L } ?: 0L
+        val listed = rooms.room(token)?.takeIf { !it.isFederated }?.lastMessage?.id ?: 0L
+        return maxOf(loaded, listed)
+    }
+
+    private val started = TimeSource.Monotonic.markNow()
+
+    /** Milliseconds since this session was opened: never set back, unlike [wall]. */
+    internal fun now(): Long = started.elapsedNow().inWholeMilliseconds
+
+    /** The phone's clock, milliseconds. */
+    @OptIn(kotlin.time.ExperimentalTime::class)
+    internal fun wall(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+
+    @Volatile
+    private var keeper: UnsentKeeper? = null
+    private val saving = Mutex()
+    private var saved: List<UnsentText> = emptyList()
+
+    /**
+     * Keep the account's unsent texts in [keeper], and take up [kept], what an earlier run of the app
+     * left there: they show as "Not sent" and go by the rules of [TextOutbox] (looked for in the chat
+     * first). Once, before anything is sent with this session.
+     */
+    fun keepUnsent(keeper: UnsentKeeper, kept: List<UnsentText>) {
+        saved = kept
+        this.keeper = keeper
+        for ((token, texts) in kept.groupBy { it.token }) textOutbox(token).restore(texts)
+    }
+
+    /** Write down what is unsent now; returns once it is written (or could not be). */
+    internal suspend fun saveUnsent() {
+        saving.withLock {
+            val keeper = keeper ?: return
+            val all = textOutboxes.value.values.flatMap { it.records() }
+            if (all != saved && keeper.keep(all)) saved = all
+        }
+    }
+
+    internal fun saveUnsentSoon() {
+        if (keeper != null) scope.launch { saveUnsent() }
+    }
+
+    /** Sending may work now (the server answered again, the app came to the front): what waits is tried soon. */
+    fun tryUnsent() {
+        resend.open()
+        for (outbox in textOutboxes.value.values) outbox.kick()
+    }
+
+    /** A text the server refused as gone, in a room no longer in the list, has nowhere to show: dropped. */
+    internal fun dropUnsentOfGoneRooms(listed: List<Room>) {
+        for ((token, outbox) in textOutboxes.value) {
+            if (!outbox.isEmpty && listed.none { it.token == token }) outbox.roomGone()
+        }
+    }
+
+    /** The account is being signed out: its unsent texts are dropped, nothing of them goes out or is written any more. */
+    fun dropUnsent() {
+        keeper = null
+        for (outbox in textOutboxes.value.values) outbox.clear()
+    }
+
     /** Hand messages fetched outside the live feed to every open view of the room. */
     internal fun absorb(token: String, messages: List<ChatMessage>) {
         for ((key, repo) in chats.value) if (key.first == token) repo.absorb(messages)
@@ -77,7 +191,43 @@ class TalkSession private constructor(
     /** A message of the room changed (an edit or delete answer): every view of the room that holds it. */
     internal fun applyChange(token: String, updated: ChatMessage) {
         for ((key, repo) in chats.value) if (key.first == token) repo.applyChange(updated)
+        savedChats.update(token, listOf(updated))
     }
+
+    /** Messages of the room changed, as its feed or a page said to one view: the views not on screen, and what the phone keeps. */
+    internal fun changedElsewhere(token: String, changes: List<ChatMessage>) {
+        if (changes.isEmpty()) return
+        for (repo in chatsOf(token)) if (!repo.isLive) changes.forEach { repo.applyChange(it) }
+        savedChats.update(token, changes)
+    }
+
+    /**
+     * The server refuses the chat of [token] to the user (or only its topic [scope], which it does not know): every view
+     * of it lets go of its messages, and nothing of it stays on the phone. General and the topics hold the chat's own.
+     */
+    internal fun chatRefused(token: String, scope: ChatScope, error: TalkError) {
+        val topic = (scope as? ChatScope.Topic)?.takeIf { error is TalkError.NotFound }
+        for (repo in chatsOf(token)) if (topic == null || repo.chatScope == topic) repo.refused(error)
+        savedChats.refused(token, topic ?: ChatScope.All)
+    }
+
+    /** The room's history was deleted, as message [id] says: every view of it, also the ones not on screen. */
+    internal fun historyCleared(token: String, id: Long) {
+        for ((key, repo) in chats.value) if (key.first == token) repo.dropBefore(id)
+        savedChats.cleared(token, id)
+    }
+
+    /** What the phone keeps of the conversations that are opened, for the next run of the app. */
+    internal val savedChats = SavedChats(this)
+
+    /** Keep the messages of this session's conversations in [keeper], and open them on what it has. Once, before any screen has the session. */
+    fun keepMessages(keeper: MessageKeeper) = savedChats.start(keeper)
+
+    /** The app leaves the screen: what waits to be kept is written now. */
+    fun flushMessages() = savedChats.flush()
+
+    /** The topics of [token] an earlier run kept messages of (id, title), for while the server's list cannot be had. */
+    fun keptTopics(token: String): List<Pair<Long, String>> = savedChats.topics(token)
 
     private val feeds = MutableStateFlow<Map<String, RoomFeed>>(emptyMap())
     private val chats = MutableStateFlow<Map<Pair<String, ChatScope>, ChatRepository>>(emptyMap())
@@ -111,6 +261,16 @@ class TalkSession private constructor(
         topicLevelListener?.invoke(token, levels)
     }
 
+    /** How much of each conversation's unread number sits in topics on Never (the grey badge). */
+    val silencedUnread = SilencedUnread(this)
+
+    private val _unreadHere = MutableStateFlow<Map<String, UnreadState>>(emptyMap())
+
+    /** What the unread trackers know, by room: the rooms opened (or looked through) in this session. */
+    val unreadHere: StateFlow<Map<String, UnreadState>> = _unreadHere.asStateFlow()
+
+    internal fun noteUnread(token: String, state: UnreadState) = _unreadHere.update { it + (token to state) }
+
     /** Topics are available on this server. When false, never show topic UI. */
     val supportsTopics: Boolean get() = capabilities.threads
 
@@ -127,6 +287,8 @@ class TalkSession private constructor(
 
     internal fun chatIfCreated(token: String, scope: ChatScope): ChatRepository? = chats.value[token to scope]
 
+    internal fun chatsOf(token: String): List<ChatRepository> = chats.value.filterKeys { it.first == token }.values.toList()
+
     /** The topics of one room. */
     fun topics(token: String): TopicsRepository = getOrCreate(topicRepos, token) { TopicsRepository(this, token) }
 
@@ -138,15 +300,20 @@ class TalkSession private constructor(
     /** The room's unread tracker if something already made one; never creates it. */
     fun unreadIfCreated(token: String): UnreadTracker? = unreadTrackers.value[token]
 
-    private fun feed(token: String): RoomFeed = getOrCreate(feeds, token) { RoomFeed(client, token, scope, waker) }
+    private fun feed(token: String): RoomFeed =
+        getOrCreate(feeds, token) { RoomFeed(client, token, scope, waker, ::tryUnsent) { chatRefused(token, ChatScope.All, it) } }
 
     /**
      * The phone's network is usable again (the app's network watch). Every room feed that waits
      * after a failure polls now (a poll on its way is asked again), a first load that failed tries
      * again, and the conversation list's reload timer, while it runs, reloads now. Anything that
-     * works carries on as it was.
+     * works carries on as it was. Texts that wait for a connection are tried again (see [TextOutbox]).
      */
-    fun networkBack() = waker.wake()
+    fun networkBack() {
+        waker.wake()
+        resend.open()
+        for (outbox in textOutboxes.value.values) outbox.kick(networkBack = true)
+    }
 
     /** Rooms being brought up to date by [prefetchChat]: token -> a push came meanwhile (go once more). */
     private val prefetching = MutableStateFlow<Map<String, Boolean>>(emptyMap())
@@ -207,13 +374,13 @@ class TalkSession private constructor(
     /**
      * Sign out: drop the push subscription, revoke the app password on the server, clear the
      * stored credentials, stop everything. Server errors are ignored on purpose, signing out
-     * must always work locally.
+     * must always work locally. False: the app password may still be good on the server.
      */
-    suspend fun logout(store: CredentialStore? = null) {
-        try { client.webPushUnregister() } catch (_: TalkError) {}
-        try { client.revokeAppPassword() } catch (_: TalkError) {}
+    suspend fun logout(store: CredentialStore? = null): Boolean {
+        val revoked = client.signOff(pushMillis = 30_000)
         store?.clear()
         close()
+        return revoked
     }
 
     /**
@@ -237,14 +404,43 @@ class TalkSession private constructor(
         suspend fun open(credentials: Credentials, http: HttpClient = newTalkHttpClient()): TalkSession {
             val client = TalkClient(credentials, http)
             try {
-                val capabilities = client.capabilities()
-                val user = client.currentUser()
+                // At once: neither needs the other's answer, and a 401 to either ends both.
+                val (capabilities, user) = coroutineScope {
+                    val user = async { client.currentUser() }
+                    client.capabilities() to user.await()
+                }
                 return TalkSession(credentials.copy(server = client.serverUrl), client, capabilities, user)
             } catch (e: Throwable) {
                 client.close()
                 throw e
             }
         }
+
+        /**
+         * The account of [saved] before the server has answered for it: names, capabilities and addresses for
+         * the screens that show the saved list, and [unsent], what an earlier run left unsent, for its rows.
+         * It is nothing but that: its client sends nothing, its own list stays empty, and it takes up no unsent
+         * text. The session [open] makes takes its place.
+         */
+        fun unchecked(credentials: Credentials, saved: SavedList, unsent: List<UnsentText>): TalkSession {
+            val client = TalkClient(credentials, engine = null)
+            val session = TalkSession(
+                credentials.copy(server = client.serverUrl), client, saved.capabilities, saved.user, checked = false,
+            )
+            session._unsent.value = unsent.groupBy { it.token }.mapValues { (_, texts) -> texts.last().notSent() }
+            return session
+        }
+
+        private fun UnsentText.notSent() = OutboxMessage(
+            referenceId = referenceId,
+            text = text,
+            replyTo = null,
+            threadId = threadId,
+            status = OutboxStatus.FAILED,
+            threadTitle = threadTitle,
+            silent = silent,
+            replyToId = replyTo,
+        )
 
         /** [open] with whatever [store] holds; null when nobody is signed in. */
         suspend fun restore(store: CredentialStore): TalkSession? = store.load()?.let { open(it) }
@@ -274,6 +470,8 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
     private var errorFrom = -1L
     /** Read echoes not yet known to be in a reload's answer, by token. */
     private val echoes = MutableStateFlow<Map<String, ReadEcho>>(emptyMap())
+    /** What the user changed of a conversation here, not yet known to be in a reload's answer, oldest first. */
+    private val changes = MutableStateFlow<List<OwnChange>>(emptyList())
 
     /** All conversations, most recent activity first. */
     val rooms: StateFlow<List<Room>> = _rooms.asStateFlow()
@@ -283,6 +481,7 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
 
     /** Reload from the server. Returns false (and sets [state].error) on failure. */
     suspend fun refresh(): Boolean {
+        val failing = _state.value.error is TalkError.Network
         _state.update { it.copy(loading = true) }
         val sentAt = clock.updateAndGet { it + 1 }
         return try {
@@ -299,15 +498,25 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
                 shownFrom = sentAt
                 // Echoes from before this reload was sent are in its answer; later ones are not.
                 echoes.update { all -> all.filterValues { it.at > sentAt } }
+                changes.update { all -> all.filter { it.at > sentAt } }
                 _rooms.update {
                     val newer = echoes.value
-                    list.map { room -> newer[room.token]?.let { room.withRead(it.marker, it.left) } ?: room }
+                    val own = changes.value
+                    list.mapNotNull { room ->
+                        val read = newer[room.token]?.let { room.withEcho(it) } ?: room
+                        own.fold<OwnChange, Room?>(read) { r, c -> if (r != null && r.token == c.token) c.change(r) else r }
+                    }
                 }
                 // An error from a reload sent after this one is newer than this success: kept.
                 _state.update { if (sentAt > errorFrom) LoadState(loaded = true) else it.copy(loaded = true, loading = false) }
                 true
             }
-            if (newest) noteTopics(list)
+            if (newest) {
+                noteTopics(list)
+                session.dropUnsentOfGoneRooms(list)
+            }
+            // The server answers again: what could not be sent may go.
+            if (failing) session.tryUnsent()
             true
         } catch (e: TalkError) {
             publish.withLock {
@@ -340,6 +549,7 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
     private fun noteTopics(list: List<Room>) {
         if (!session.supportsTopics) return
         for (room in list) if (room.lastMessageTopicId != 0L) session.noteTopics(room.token, true)
+        session.silencedUnread.recheck()
         if (askedFollowedTopics) return
         askedFollowedTopics = true
         session.scope.launch {
@@ -370,13 +580,46 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
         echoes.update { all ->
             val earlier = all[token]
             val echo = when {
-                earlier == null || lastReadMessage > earlier.marker -> ReadEcho(lastReadMessage, at, left)
+                earlier == null || earlier.exactUpTo != null || lastReadMessage > earlier.marker -> ReadEcho(lastReadMessage, at, left)
                 lastReadMessage == earlier.marker -> ReadEcho(lastReadMessage, at, left ?: earlier.left)
                 else -> earlier.copy(at = at)
             }
             all + (token to echo)
         }
         _rooms.update { list -> list.map { if (it.token == token) it.withRead(lastReadMessage, left) else it } }
+    }
+
+    /**
+     * The user's own "Mark as read" / "Mark as unread" in the list, as the server answered it: the marker
+     * (it may have gone back) and the numbers as they are, true up to message [exactUpTo] (a row that
+     * already shows a newer one keeps its own: the list knows more).
+     */
+    internal fun applyMarker(token: String, marker: Long, left: ReadLeft, exactUpTo: Long) {
+        val echo = ReadEcho(marker, clock.updateAndGet { it + 1 }, left, exactUpTo)
+        echoes.update { it + (token to echo) }
+        _rooms.update { list -> list.map { if (it.token == token) it.withEcho(echo) else it } }
+    }
+
+    /**
+     * The user changed something of conversation [token] here: shown at once, and kept over the answers of
+     * reloads sent before this. Null from [change]: the conversation is no longer the user's.
+     */
+    internal fun applyOwn(token: String, change: (Room) -> Room?) {
+        val own = OwnChange(token, clock.updateAndGet { it + 1 }, change)
+        changes.update { it + own }
+        _rooms.update { list -> list.mapNotNull { if (it.token == token) change(it) else it } }
+    }
+
+    private fun Room.withEcho(echo: ReadEcho): Room = when {
+        echo.exactUpTo == null || echo.left == null -> withRead(echo.marker, echo.left)
+        // Its numbers; the marker is where it was put, not where an older answer has it.
+        (lastMessage?.id ?: 0L) > echo.exactUpTo -> if (lastReadMessage < echo.marker) copy(lastReadMessage = echo.marker) else this
+        else -> copy(
+            lastReadMessage = echo.marker,
+            unreadMessages = maxOf(0, echo.left.unread),
+            unreadMention = echo.left.mention,
+            unreadMentionDirect = echo.left.direct,
+        )
     }
 
     /**
@@ -402,5 +645,11 @@ class RoomsRepository internal constructor(private val session: TalkSession) {
 /** What is still unread in a room right after its read marker moved, as the server answered the move. */
 internal data class ReadLeft(val unread: Int, val mention: Boolean, val direct: Boolean)
 
-/** A "mark read" echo: the marker, [RoomsRepository]'s clock when it was made, and the numbers after it. */
-private data class ReadEcho(val marker: Long, val at: Long, val left: ReadLeft?)
+/**
+ * A "mark read" echo: the marker, [RoomsRepository]'s clock when it was made, and the numbers after it.
+ * [exactUpTo]: see [RoomsRepository.applyMarker]; null for the echo of reading.
+ */
+private data class ReadEcho(val marker: Long, val at: Long, val left: ReadLeft?, val exactUpTo: Long? = null)
+
+/** See [RoomsRepository.applyOwn]. */
+private class OwnChange(val token: String, val at: Long, val change: (Room) -> Room?)

@@ -92,8 +92,13 @@ import talq.core.model.mentionQueryAt
  * without it). Esc ends an edit, else cancels the reply; beside the list (two panes) it never goes
  * on to Back, which would hide the app there. Up in an empty box, with no reply or edit
  * open, edits the user's newest message ([onEditLast], desktop's `requestEditLast`).
- * With [onAttach] a paperclip sits before the field; what is typed then goes out as the caption
- * of the first file picked.
+ * With [onAttach] a paperclip sits before the field. What is picked waits in the [tray] above it (null:
+ * nothing waits): Send then sends the files with what is typed as the caption, also when that is empty,
+ * and stays off until every copy is made. [onPaste]: a paste from a hardware keyboard; true when the
+ * clipboard held a file and it was taken, else the field pastes as it does.
+ *
+ * [over]: the text is that many characters past the server's limit. One line says so above the field and
+ * Send is off; nothing is cut.
  *
  * [editing]: a sent message is being edited. The editing bar (accent strip, "Editing", the message
  * as it was, X = [onCancelEdit]) takes the reply bar's place, [text] is the edit's text and the
@@ -103,9 +108,12 @@ import talq.core.model.mentionQueryAt
  * [focusTick]: each new value puts the cursor in the box (at the end of the text) and raises the
  * keyboard, once the window has the focus back (the long-press sheet is a window of its own).
  *
+ * [onEscape]: what an Esc in the box closes when it has nothing of its own to close (null: nothing).
+ *
  * With [onSendOptions], touching and holding the send button opens the send options (send
- * silently, send later). [busy]: a "send later" request is on its way; the button shows progress
- * and takes nothing, and the box stays as it is until the server has answered. [sentSilently]
+ * silently, send later). [busy]: a "send later" request is on its way ([busyLabel] names another one);
+ * the button shows progress and takes nothing, and the box stays as it is until the server has
+ * answered. [sentSilently]
  * shows a crossed-out bell on the button for a moment after a silent send.
  *
  * With [voice], an empty (or blank) box puts a microphone on the button (Send as soon as something
@@ -131,6 +139,7 @@ fun Composer(
     onAttach: (() -> Unit)? = null,
     onSendOptions: (() -> Unit)? = null,
     busy: Boolean = false,
+    busyLabel: String = "Scheduling",
     sentSilently: Boolean = false,
     voice: VoiceRecordUi? = null,
     onSendSilently: (() -> Unit)? = null,
@@ -139,10 +148,15 @@ fun Composer(
     onCancelEdit: () -> Unit = {},
     onEditLast: (() -> Boolean)? = null,
     mentions: MentionSuggester? = null,
+    tray: ComposerTray? = null,
+    over: Int = 0,
+    onPaste: (() -> Boolean)? = null,
+    onEscape: (() -> Unit)? = null,
 ) {
     val colors = TalqTheme.colors
-    val canSend = text.isNotBlank() && !busy
+    val canSend = (tray?.ready ?: text.isNotBlank()) && !busy && over == 0
     val recording = voice?.recording
+    val preparing = tray?.preparing == true && recording == null
     // The button records (or, while recording, sends the recording) instead of sending text. Not
     // while the bell of a silent send shows; a box holding only spaces counts as empty.
     val micMode = voice != null && !busy && (recording != null || (text.isBlank() && !sentSilently))
@@ -214,6 +228,11 @@ fun Composer(
                 onCancel = onCancelReply,
             )
         }
+        if (recording == null) {
+            // Like the list of names: measured after the field, which keeps its place in a short window.
+            if (tray != null) Box(Modifier.weight(1f, fill = false)) { tray.content() }
+            if (over > 0) TrayLine(tooLongText(over))
+        }
         Row(
             modifier = Modifier.fillMaxWidth().padding(start = if (onAttach != null || recording != null) 2.dp else 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.Bottom,
@@ -263,6 +282,10 @@ fun Composer(
                         .focusRequester(focus)
                         .onPreviewKeyEvent { e ->
                             if (!e.fromHardwareKeyboard()) return@onPreviewKeyEvent false
+                            // A file on the clipboard goes into the tray; anything else is the field's own paste.
+                            if (e.isPaste() && e.type == KeyEventType.KeyDown && e.nativeKeyEvent.repeatCount == 0 && onPaste?.invoke() == true) {
+                                return@onPreviewKeyEvent true
+                            }
                             // The list of names first, while it shows (desktop's popup keys).
                             if (rows != null) {
                                 val down = e.type == KeyEventType.KeyDown
@@ -298,12 +321,13 @@ fun Composer(
                                     true
                                 }
                                 // Closes the list of names, the edit or the reply (in that order); a save
-                                // on its way takes it and does nothing. With nothing to close it goes on
+                                // on its way takes it and does nothing; then what the caller has open
+                                // (onEscape). With nothing to close it goes on
                                 // (Android makes it Back) on a phone; beside the list Back would hide the
                                 // whole app, so there the box keeps it, as desktop's box does.
                                 Key.Escape -> when (e.type) {
                                     KeyEventType.KeyDown -> {
-                                        escapeTaken = rows != null || editing != null || replyTo != null || twoPane
+                                        escapeTaken = rows != null || editing != null || replyTo != null || onEscape != null || twoPane
                                         if (escapeTaken && e.nativeKeyEvent.repeatCount == 0) {
                                             if (rows != null) {
                                                 hideMentions()
@@ -311,6 +335,8 @@ fun Composer(
                                                 if (!busy) onCancelEdit()
                                             } else if (replyTo != null) {
                                                 onCancelReply()
+                                            } else {
+                                                onEscape?.invoke()
                                             }
                                         }
                                         escapeTaken
@@ -382,17 +408,17 @@ fun Composer(
                     ),
                 contentAlignment = Alignment.Center,
             ) {
-                if (busy || finishing) {
+                if (busy || finishing || preparing) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(20.dp).semantics {
                             contentDescription = when {
-                                !busy -> "Sending"
+                                !busy -> if (preparing) "Preparing" else "Sending"
                                 editing != null -> "Saving"
-                                else -> "Scheduling"
+                                else -> busyLabel
                             }
                         },
                         strokeWidth = 2.dp,
-                        color = if (busy) colors.textMuted else colors.controlInk,
+                        color = if (busy || preparing) colors.textMuted else colors.controlInk,
                     )
                 } else if (editing != null && !micMode) {
                     Icon(
@@ -460,4 +486,12 @@ private fun BoxBar(title: String, preview: String, cancelLabel: String, cancelEn
 private fun KeyEvent.fromHardwareKeyboard(): Boolean {
     val native = nativeKeyEvent
     return native.deviceId != KeyCharacterMap.VIRTUAL_KEYBOARD && (native.flags and AndroidKeyEvent.FLAG_SOFT_KEYBOARD) == 0
+}
+
+/** The keys a text field pastes on: Ctrl+V, Shift+Insert, Paste. */
+private fun KeyEvent.isPaste(): Boolean = when (key) {
+    Key.V -> isCtrlPressed && !isAltPressed && !isShiftPressed
+    Key.Insert -> isShiftPressed
+    Key.Paste -> true
+    else -> false
 }

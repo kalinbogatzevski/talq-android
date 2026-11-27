@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Check
@@ -55,6 +57,7 @@ import talq.app.ui.common.MessagePane
 import talq.app.ui.message.PendingRow
 import talq.core.model.NotificationLevel
 import talq.core.repo.OutboxMessage
+import talq.core.repo.OutboxStatus
 
 private const val MAX_TITLE = 200
 
@@ -111,7 +114,7 @@ fun ChipMenuSheet(
 ) {
     val colors = TalqTheme.colors
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 12.dp)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(bottom = 12.dp)) {
             Text(
                 title,
                 style = MaterialTheme.typography.titleMedium,
@@ -227,6 +230,9 @@ fun TopicTitleDialog(
  * The content of a draft topic's tab: nothing yet, and a composer for its first message.
  * Sending that message is what creates the topic. While it is on its way (or has failed) it is
  * shown in place of the composer, so a second "first message" cannot make a second topic.
+ *
+ * @param busy the chat is being read for an earlier attempt first: the box is read-only, a failed
+ *   message shows as on its way
  */
 @Composable
 fun DraftTopicPane(
@@ -238,12 +244,20 @@ fun DraftTopicPane(
     onSend: () -> Unit,
     onRetry: () -> Unit,
     onEditAgain: () -> Unit,
+    busy: Boolean = false,
     mentions: MentionSuggester? = null,
+    over: Int = 0,
 ) {
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
             if (pending != null) {
-                PendingRow(outbox = pending, onRetry = onRetry, onDiscard = onEditAgain, text = mentions?.readable(pending.text) ?: pending.text)
+                PendingRow(
+                    outbox = if (busy) pending.copy(status = OutboxStatus.SENDING) else pending,
+                    onRetry = onRetry,
+                    onDiscard = onEditAgain,
+                    text = mentions?.readable(pending.text) ?: pending.text,
+                    discardLabel = "Edit",
+                )
             } else if (!sending) {
                 MessagePane(
                     title = title,
@@ -259,7 +273,10 @@ fun DraftTopicPane(
                 onCancelReply = {},
                 onSend = onSend,
                 placeholder = "First message in $title…",
+                busy = busy,
+                busyLabel = "Sending",
                 mentions = mentions,
+                over = over,
             )
         }
     }

@@ -64,19 +64,23 @@ data class FolderRollup(
     val unread: Int = 0,
     val mention: Boolean = false,
     val directMention: Boolean = false,
+    /** The unread messages that were muted (a number of its own beside [unread], never in it). */
+    val muted: Int = 0,
 )
 
 /**
  * count + 1, unread + max(0, unreadCount) (both saturating, so an absurd count cannot wrap negative
- * and hide a badge), flags OR-ed. A direct mention IS a mention.
+ * and hide a badge), flags OR-ed. A direct mention IS a mention. [muted] adds up the same way, apart.
  */
-fun addToRollup(r: FolderRollup, unreadCount: Int, mention: Boolean, directMention: Boolean): FolderRollup {
+fun addToRollup(r: FolderRollup, unreadCount: Int, mention: Boolean, directMention: Boolean, muted: Int = 0): FolderRollup {
     val u = maxOf(0, unreadCount)
+    val m = maxOf(0, muted)
     return FolderRollup(
         count = if (r.count < Int.MAX_VALUE) r.count + 1 else r.count,
         unread = if (r.unread > Int.MAX_VALUE - u) Int.MAX_VALUE else r.unread + u,
         mention = r.mention || mention || directMention,
         directMention = r.directMention || directMention,
+        muted = if (r.muted > Int.MAX_VALUE - m) Int.MAX_VALUE else r.muted + m,
     )
 }
 

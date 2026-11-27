@@ -14,22 +14,34 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import talq.core.files.ByteReader
 import talq.core.files.ByteSource
 import talq.core.files.FileNames
-import kotlin.coroutines.coroutineContext
 
-/** A file copied into the app's cache, ready to upload. [path] is the app's own copy. */
-data class StagedFile(val path: String, val name: String, val mimeType: String, val size: Long)
+/**
+ * A file copied into the app's cache, ready to upload. [path] is the app's own copy. [toClean]: by its content
+ * ([Mp4Metadata.needsCleaning]), whatever its type and name say, it loses its location before it goes.
+ */
+@Serializable
+data class StagedFile(val path: String, val name: String, val mimeType: String, val size: Long, val toClean: Boolean = false)
 
 /**
  * A photo that was to be made smaller (and lose its location) could not be, and cannot be
  * cleaned either: it is not sent rather than sent as it is.
  */
 class NotPreparedException(message: String) : IOException(message)
+
+/** The phone has no room left for a copy. */
+class NoRoomException : IOException("no room left on the phone")
 
 /** A cache file as upload bytes. A retry opens it again from the start. */
 class FileByteSource(private val file: File) : ByteSource {
@@ -48,7 +60,7 @@ class FileByteSource(private val file: File) : ByteSource {
     }
 }
 
-/** "Send original" for photos: off unless the user turned it on; remembered on this device. */
+/** "Send original" for photos and videos: off unless the user turned it on; remembered on this device. */
 class SendPrefs(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("talq_files", Context.MODE_PRIVATE)
 
@@ -77,14 +89,16 @@ object Staging {
     /**
      * Remove copies nothing refers to any more (a share that was abandoned, a process that
      * died between copying and queueing): every outgoing folder that holds none of [keep] and
-     * every camera file, when older than a few minutes / an hour. Run once at start.
+     * every camera file, when older than a few minutes / an hour. Run once at start. In the folders
+     * that stay, the half written smaller video of a process that died before [startedAt] goes.
      */
-    fun sweep(context: Context, keep: Set<String>) {
+    fun sweep(context: Context, keep: Set<String>, startedAt: Long) {
         val now = System.currentTimeMillis()
         val kept = keep.mapNotNull { runCatching { File(it).canonicalFile.parentFile }.getOrNull() }.toSet()
         outgoingDir(context).listFiles()?.forEach { dir ->
             val canonical = runCatching { dir.canonicalFile }.getOrNull() ?: return@forEach
             if (canonical !in kept && now - dir.lastModified() > OUTGOING_KEEP_MILLIS) dir.deleteRecursively()
+            if (canonical in kept) VideoShrink.dropUnfinished(dir, startedAt)
         }
         cameraDir(context).listFiles()?.forEach { if (now - it.lastModified() > CAMERA_KEEP_MILLIS) it.delete() }
     }
@@ -117,13 +131,14 @@ object Staging {
             uri.authority?.substringAfterLast('@') != authority(context)
 
     /**
-     * Copy what [uri] points to into the cache. A photo is shrunk unless [sendOriginal].
+     * Copy what [uri] points to into the cache. A photo is shrunk unless [sendOriginal]. [hint]: its type
+     * as the clipboard, the drag or the keyboard names it, for a provider that does not say.
      * Throws [IOException] when it cannot be read.
      */
-    suspend fun stage(context: Context, uri: Uri, sendOriginal: Boolean): StagedFile = withContext(Dispatchers.IO) {
+    suspend fun stage(context: Context, uri: Uri, sendOriginal: Boolean, hint: String = ""): StagedFile = withContext(Dispatchers.IO) {
         if (!isAcceptable(context, uri)) throw IOException("not a content URI")
         val resolver = context.contentResolver
-        val given = resolver.getType(uri).orEmpty()
+        val given = resolver.getType(uri).orEmpty().ifEmpty { hint }
         val name = displayName(context, uri, given)
         // The content decides whether this is a photo, not the type the provider reports: a
         // file manager may call a JPEG "application/octet-stream", and it must still lose its
@@ -137,14 +152,28 @@ object Staging {
         }
     }
 
-    /** The same for a photo the camera just wrote into our cache. The camera file is removed. */
-    suspend fun stageCamera(context: Context, file: File, sendOriginal: Boolean): StagedFile = withContext(Dispatchers.IO) {
-        try {
-            if (!isCameraFile(context, file) || file.length() == 0L) throw IOException("no photo was taken")
-            stageFrom(context, file.name, "image/jpeg", sendOriginal) { FileInputStream(file) }
-        } finally {
-            file.delete()
-        }
+    /**
+     * The same for a photo the camera just wrote into our cache, as it is. It is moved: that takes no room,
+     * and it is the only copy of the picture (it stays where it is when it can be neither moved nor copied).
+     */
+    suspend fun stageCamera(context: Context, file: File): StagedFile = withContext(Dispatchers.IO) {
+        if (!isCameraFile(context, file) || file.length() == 0L) throw IOException("no photo was taken")
+        val dir = newFolder(context)
+        val target = File(dir, file.name)
+        if (file.renameTo(target)) return@withContext StagedFile(target.path, target.name, CAMERA_MIME, target.length())
+        dir.delete()
+        stageFrom(context, file.name, CAMERA_MIME, sendOriginal = true) { FileInputStream(file) }.also { file.delete() }
+    }
+
+    /** A photo that goes out smaller and without its location, unless it is sent as the original. */
+    fun isPhoto(mimeType: String): Boolean = mimeType.lowercase() in SHRINKABLE
+
+    /**
+     * The smaller copy of the photo [file] (a copy made with `sendOriginal`), beside it in a folder of its
+     * own. Throws [IOException] when it cannot be made.
+     */
+    suspend fun smaller(context: Context, file: StagedFile): StagedFile = withContext(Dispatchers.IO) {
+        stageFrom(context, file.name, file.mimeType, sendOriginal = false) { FileInputStream(file.path) }
     }
 
     /**
@@ -172,15 +201,20 @@ object Staging {
 
     private val HEIF_BRANDS = setOf("heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1")
 
-    /** Remove a staged file and its folder. */
+    /** Remove a staged file and its folder (its own; a video's smaller copy is in there too). */
     fun delete(context: Context, path: String) {
         val file = File(path)
         val root = runCatching { outgoingDir(context).canonicalFile }.getOrNull() ?: return
         val parent = runCatching { file.canonicalFile.parentFile }.getOrNull() ?: return
         // Only ever inside our own outgoing folder.
         if (parent.parentFile != root) return
-        file.delete()
-        parent.delete()
+        parent.deleteRecursively()
+    }
+
+    private fun newFolder(context: Context): File {
+        val dir = File(outgoingDir(context), UUID.randomUUID().toString())
+        if (!dir.mkdirs()) throw NoRoomException()
+        return dir
     }
 
     private suspend fun stageFrom(
@@ -190,8 +224,7 @@ object Staging {
         sendOriginal: Boolean,
         open: () -> InputStream,
     ): StagedFile {
-        val dir = File(outgoingDir(context), UUID.randomUUID().toString())
-        if (!dir.mkdirs()) throw IOException("no room in the cache")
+        val dir = newFolder(context)
         try {
             if (!sendOriginal && mime.lowercase() in SHRINKABLE) {
                 val target = File(dir, jpegName(name))
@@ -219,7 +252,9 @@ object Staging {
             }
             val target = File(dir, name)
             copy(open, target)
-            return StagedFile(target.path, name, mime.ifEmpty { "application/octet-stream" }, target.length())
+            // Asked of the copy: it is what will be sent.
+            val toClean = Mp4Metadata.needsCleaning(target)
+            return StagedFile(target.path, name, mime.ifEmpty { "application/octet-stream" }, target.length(), toClean)
         } catch (e: Throwable) {
             dir.deleteRecursively()
             throw if (e is SecurityException) IOException("no permission to read the file", e) else e
@@ -227,28 +262,47 @@ object Staging {
     }
 
     /** Copy, giving up when the phone runs out of room (a provider may stream without end). */
-    private suspend fun copy(open: () -> InputStream, target: File) {
+    private suspend fun copy(open: () -> InputStream, target: File): Unit = coroutineScope {
         open().use { input ->
-            target.outputStream().use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var written = 0L
-                var checked = 0L
-                while (true) {
-                    coroutineContext.ensureActive()
-                    val n = input.read(buffer)
-                    if (n < 0) break
-                    output.write(buffer, 0, n)
-                    written += n
-                    if (written - checked >= SPACE_CHECK_BYTES) {
-                        checked = written
-                        if (written > MAX_BYTES || target.parentFile!!.usableSpace < SPACE_RESERVE_BYTES) {
-                            throw IOException("the file is too large for the room left on this phone")
+            // A read that hangs (a provider without a network) does not see that the file was given up: closing ends it.
+            val closer = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    runCatching { input.close() }
+                }
+            }
+            try {
+                target.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var written = 0L
+                    while (true) {
+                        ensureActive()
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        if (unchecked.addAndGet(n.toLong()) >= SPACE_CHECK_BYTES) {
+                            // Left as it is when there is no room: the next file looks again at once.
+                            if (target.parentFile!!.usableSpace < SPACE_RESERVE_BYTES) throw NoRoomException()
+                            unchecked.set(0L)
                         }
+                        output.write(buffer, 0, n)
+                        written += n
+                        if (written > MAX_BYTES) throw IOException("the file is too large")
                     }
                 }
+                ensureActive()
+            } catch (e: Exception) {
+                // Given up (the stream was closed under the read), not failed.
+                ensureActive()
+                throw e
+            } finally {
+                closer.cancel()
             }
         }
     }
+
+    /** What was copied since the room on the phone was last looked at, all files together: many small ones fill it too. */
+    private val unchecked = AtomicLong()
 
     private fun isJpeg(mime: String): Boolean = mime.lowercase().let { it == "image/jpeg" || it == "image/jpg" }
 
@@ -323,6 +377,7 @@ object Staging {
 
     /** Photos. Not PNG (drawings, transparency), not GIF (animation). */
     private val SHRINKABLE = setOf("image/jpeg", "image/jpg", "image/heic", "image/heif")
+    private const val CAMERA_MIME = "image/jpeg"
     private const val OUTGOING_KEEP_MILLIS = 10 * 60 * 1000L
     private const val CAMERA_KEEP_MILLIS = 60 * 60 * 1000L
     private const val MAX_BYTES = 8L * 1024 * 1024 * 1024

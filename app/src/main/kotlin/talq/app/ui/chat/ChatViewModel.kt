@@ -23,16 +23,18 @@ import talq.core.TalkError
 import talq.core.model.ChatMessage
 import talq.core.model.MessageRefusal
 import talq.core.model.MessageRequest
-import talq.core.model.canDeleteMessage
-import talq.core.model.canEditMessage
 import talq.core.model.classifyMessageRefusal
 import talq.core.model.editableText
 import talq.core.model.mentionNamesOf
+import talq.core.model.messageOver
 import talq.core.model.classifyScheduleFailure
 import talq.core.model.keepReplyAfterRefusal
 import talq.core.model.statusAndCode
+import talq.core.repo.Around
 import talq.core.repo.ChatRepository
 import talq.core.repo.ChatScope
+import talq.core.repo.ChatWindow
+import talq.core.repo.OutboxMessage
 import talq.core.repo.TalkSession
 import talq.core.repo.TopicsRepository
 import talq.core.repo.UnreadTracker
@@ -93,15 +95,34 @@ class ChatViewModel(
         }
     }
 
-    private val draftKey = ComposerDrafts.Key(ComposerDrafts.accountOf(session), token, tab.key)
+    private val draftKey = ComposerDrafts.Key(ComposerDrafts.accountOf(session), token, tab.boxKey)
 
     init {
         drafts.opened(draftKey)
         // Android ended the process while the room was open: the text comes back from the saved
-        // state, unless the session already holds a draft for the tab.
-        if (!drafts.has(draftKey)) saved.get<String>(KEY_DRAFT)?.takeIf { it.isNotEmpty() }?.let { drafts.setText(draftKey, it) }
-        // The saved copy follows the box, also when an answer empties it (a scheduled text must not come back).
-        viewModelScope.launch { snapshotFlow { drafts.text(draftKey) }.collect { saved[KEY_DRAFT] = it } }
+        // state, unless the session already holds a draft for the tab. The room's own box has the copies
+        // of two tabs (RoomTab.boxKey), the same text; two different ones (from a version in which the
+        // whole chat and General had a box each) are both kept.
+        saved.get<String>(KEY_DRAFT)?.takeIf { it.isNotEmpty() }?.let { kept ->
+            val held = drafts.text(draftKey)
+            if (!drafts.has(draftKey) || (tab !is RoomTab.Topic && held.isNotBlank() && kept !in held)) {
+                drafts.unpackNames(saved.get<ArrayList<String>>(KEY_NAMES))
+                drafts.setText(draftKey, ComposerDrafts.mergeRestoredText(held, kept))
+            }
+        }
+        // The saved copy follows the box, also when an answer empties it (a scheduled text must not come
+        // back). The names its mentions are shown with go along.
+        viewModelScope.launch {
+            snapshotFlow { drafts.text(draftKey).let { it to drafts.packNames(it) } }.collect { (text, names) ->
+                saved[KEY_DRAFT] = ComposerDrafts.savable(text)
+                saved[KEY_NAMES] = names
+            }
+        }
+        // A mention whose name is not known (a text from before the process ended): asked for once.
+        viewModelScope.launch {
+            snapshotFlow { drafts.unnamed(listOf(drafts.text(draftKey))).isNotEmpty() }.first { it }
+            resolveMentionNames(session, token, drafts, listOf(drafts.text(draftKey)))
+        }
     }
 
     /** What is typed but not sent, kept in its tab until it is sent (see [ComposerDrafts]). */
@@ -112,6 +133,34 @@ class ChatViewModel(
     var replyTo: ChatMessage?
         get() = drafts.replyTo(draftKey)
         set(value) = drafts.setReplyTo(draftKey, value)
+
+    /** The files waiting above the box are kept under the draft's own key (`AttachTrays`), whatever that is made of. */
+    val trayKey: ComposerDrafts.Key get() = draftKey
+
+    /**
+     * The caption and the reply of a file that was cancelled are the user's again: after what the box holds
+     * by now (desktop's `mergeRestoredText`), the reply only into an empty one.
+     */
+    fun takeBack(caption: String, quote: ChatMessage?) {
+        if (quote != null && draft.isBlank() && replyTo == null) replyTo = quote
+        draft = ComposerDrafts.mergeRestoredText(draft, caption)
+    }
+
+    /**
+     * A text that does not go by itself (refused, or not known to have arrived) is the user's again, in the box; with
+     * the title of the topic it was to start, which was typed too. False when nothing was taken back.
+     */
+    fun editUnsent(out: OutboxMessage): Boolean {
+        val busy = if (scheduling) "Wait: a message is being scheduled." else if (editing != null) "Finish or cancel the edit first." else null
+        if (busy != null) {
+            notice = busy
+            return false
+        }
+        // On its way again, or found in the chat by now.
+        if (!repo.discard(out.referenceId)) return false
+        takeBack(ComposerDrafts.mergeRestoredText(out.threadTitle, out.text), out.replyTo)
+        return true
+    }
 
     /** The "@" suggestions of this tab's box (see Mentions.kt). */
     val mentions = MentionSuggester(session, token, viewModelScope, drafts)
@@ -160,8 +209,10 @@ class ChatViewModel(
         val text = draft.trim()
         val refused = when {
             !session.capabilities.scheduledMessages -> "Not scheduled: the server doesn't offer it."
+            // Local only: the schedule routes answer 406 there.
+            session.rooms.room(token)?.isFederated == true -> "Not scheduled: this conversation is on another server."
             text.isEmpty() -> "Not scheduled: type a message first."
-            text.length > maxLength -> "Not scheduled: the message is too long."
+            messageOver(text, maxLength) > 0 -> "Not scheduled: the message is too long."
             sendAt < System.currentTimeMillis() / 1000 + MIN_LEAD_SECONDS -> "Not scheduled: pick a time at least a minute ahead."
             else -> null
         }
@@ -172,6 +223,7 @@ class ChatViewModel(
         val quote = replyTo
         val topic = repo.topicFor(quote)
         drafts.setScheduling(draftKey, true)
+        session.roomActions.wroteIn(token)
         // On the session's scope, the answer included: leaving the room must neither cut the
         // request off halfway nor lose what the server said. The session ending (signed out)
         // under it cancels it, and then nothing is said. The flag is the request's own: it ends
@@ -197,6 +249,7 @@ class ChatViewModel(
     override fun onCleared() {
         cleared = true
         drafts.closed(draftKey)
+        window?.let { repo.close(it) }
         // Left before the list had rested: what was on screen still counts (viewModelScope is
         // already cancelled here, the pass runs on the session's).
         if (passPending) pass()
@@ -225,9 +278,10 @@ class ChatViewModel(
         if (cleared) sayAnywhere(appContext, "$line Kept as a draft.") else notice = line
     }
 
-    // ---------------------------------------------------------------- editing and deleting own messages
+    // ---------------------------------------------------------------- editing and deleting
     //
-    // Ported from TalQ for desktop's message menu (Edit / Delete on own messages), beginEditingMessage,
+    // Ported from TalQ for desktop's message menu (Edit / Delete on own messages; a moderator's Delete on
+    // other people's is ours, as Talk allows it), beginEditingMessage,
     // the composer's editing bar and MessageListModel::editMessage / deleteMessage; rules in
     // talq.core.model MessageEdits.kt. Both requests run on the session's scope and act on the tab's
     // stored box, as "send later" does: leaving the room neither cuts them off nor loses the answer.
@@ -243,19 +297,11 @@ class ChatViewModel(
     /** The edit's save is on its way: the box is read-only and Save shows progress. */
     val saving: Boolean get() = drafts.edit(draftKey)?.saving == true
 
-    private fun nowSeconds(): Long = System.currentTimeMillis() / 1000
-
     /** "Edit" may be offered for [m]: the user's own text, still within the server's time. */
-    fun canEdit(m: ChatMessage): Boolean {
-        val room = session.rooms.room(token) ?: return false
-        return canEditMessage(m, isMe(m), session.capabilities, room.type, room.isReadOnly, nowSeconds())
-    }
+    fun canEdit(m: ChatMessage): Boolean = mayEdit(session, token, m)
 
-    /** "Delete" may be offered for [m]. */
-    fun canDelete(m: ChatMessage): Boolean {
-        val room = session.rooms.room(token) ?: return false
-        return canDeleteMessage(m, isMe(m), session.capabilities, room.isReadOnly, nowSeconds())
-    }
+    /** "Delete" may be offered for [m]: the user's own, or anybody's for a moderator. */
+    fun canDelete(m: ChatMessage): Boolean = mayDelete(session, token, m)
 
     /**
      * Open [m] in the box: its raw text with the mentions put back (desktop's rawBodyFor), the
@@ -298,7 +344,7 @@ class ChatViewModel(
             drafts.endEdit(draftKey, m.id)
             return
         }
-        if (text.length > maxLength) {
+        if (messageOver(text, maxLength) > 0) {
             notice = messageRefusalText(MessageRequest.Edit, MessageRefusal.TooLong, 413)
             return
         }
@@ -351,13 +397,116 @@ class ChatViewModel(
     private fun deletedAnswer(m: ChatMessage, failure: TalkError?) {
         if (failure == null) {
             // Nothing left to save or to reply to.
-            drafts.endEdit(draftKey, m.id)
-            if (replyTo?.id == m.id) replyTo = null
+            drafts.messageGone(draftKey.account, token, m.id)
             return
         }
         val (status, code) = failure.statusAndCode()
         val line = messageRefusalText(MessageRequest.Delete, classifyMessageRefusal(MessageRequest.Delete, status, code), status)
         if (cleared) sayAnywhere(appContext, line) else notice = line
+    }
+
+    // ---------------------------------------------------------------- a message further back
+    //
+    // One way to a message, whoever asks: the quote that was tapped, a notification, "Show in chat" (desktop's
+    // MainWindow::jumpToMessage is the one for all callers too). What is loaded is scrolled to; anything else is
+    // read from the server and shown in a window of its own (talq.core.repo ChatWindow), beside this tab's own
+    // messages, which stay as they are. (Desktop merges what it read into its list, which then has a gap nobody
+    // sees.) Held here, not in the saved state: a turned phone keeps it, a new process shows the chat as usual.
+
+    /** A message being looked for; [from]: the message whose quote was tapped, 0 = asked for from elsewhere. */
+    data class Seeking(val messageId: Long, val from: Long)
+
+    /** A message to bring on screen in the list that is shown; [animate]: that list was on screen before. */
+    data class BringUp(val messageId: Long, val animate: Boolean)
+
+    var seeking by mutableStateOf<Seeking?>(null)
+        private set
+    private var seekJob: Job? = null
+
+    /** Found; the screen clears it once it is on screen ([broughtUp]). */
+    var bringUp by mutableStateOf<BringUp?>(null)
+        private set
+
+    /** Could not be loaded; the screen says so, with "Try again", and clears it. */
+    var seekFailed by mutableStateOf<Seeking?>(null)
+
+    /** It is in another tab: (topic or 0, message). The screen hands it on and clears it. */
+    var elsewhere by mutableStateOf<Pair<Long, Long>?>(null)
+
+    /** The messages around one that is further back, shown in place of the tab's own until [leaveWindow]. */
+    var window by mutableStateOf<ChatWindow?>(null)
+        private set
+
+    /** Opened by a quote in this tab: Back goes back to it. */
+    var windowFromQuote = false
+        private set
+
+    /** Go to message [messageId] of this conversation. The newest request counts; the same one again changes nothing. */
+    fun seek(messageId: Long, from: Long = 0L) {
+        if (seeking?.messageId == messageId) return
+        seekJob?.cancel()
+        val asked = Seeking(messageId, from)
+        seeking = asked
+        seekFailed = null
+        seekJob = viewModelScope.launch {
+            try {
+                found(asked)
+            } finally {
+                if (seeking === asked) seeking = null
+            }
+        }
+    }
+
+    private suspend fun found(asked: Seeking) {
+        val id = asked.messageId
+        if (window?.holds(id) == true) {
+            bringUp = BringUp(id, animate = true)
+            return
+        }
+        when (val where = repo.around(id, load = session.capabilities.messageContext)) {
+            is Around.Here -> {
+                val same = window == null
+                show(null)
+                bringUp = BringUp(where.messageId, animate = same)
+            }
+            is Around.InWindow -> {
+                show(where.window, fromQuote = asked.from != 0L)
+                bringUp = BringUp(where.window.target, animate = false)
+            }
+            is Around.Elsewhere -> elsewhere = where.topicId to id
+            Around.Gone -> notice = "That message is gone."
+            Around.OutOfReach -> notice = "That message is further back. Scroll up to load it."
+            is Around.Failed -> seekFailed = asked
+        }
+    }
+
+    private fun show(next: ChatWindow?, fromQuote: Boolean = false) {
+        window?.let { if (it !== next) repo.close(it) }
+        window = next
+        windowFromQuote = fromQuote
+    }
+
+    fun broughtUp(what: BringUp) {
+        if (bringUp === what) bringUp = null
+    }
+
+    /** The tab was left: what is still being looked for is given up. */
+    fun seekLeft() {
+        seekJob?.cancel()
+        seekJob = null
+        seeking = null
+        bringUp = null
+    }
+
+    /** The tab's own messages again, whatever is being looked for. */
+    fun leaveWindow() {
+        seekLeft()
+        show(null)
+    }
+
+    /** The window's messages are the tab's own by now ([ChatRepository.join]). */
+    fun windowJoined(joined: ChatWindow) {
+        if (window === joined) show(null)
     }
 
     /** The newest room entry [onSeen] was given (see there). */
@@ -408,8 +557,18 @@ class ChatViewModel(
         session.launch { unread.markSeen(scope, upTo) }
     }
 
-    fun loadOlder() {
-        viewModelScope.launch { repo.loadOlder() }
+    /** Not on the screen's scope: turning the phone does not cut a page off. Nor on its thread: pages are large. */
+    fun loadOlder(): Job {
+        val of = window
+        return viewModelScope.launch(Dispatchers.Default) { of?.loadOlder() ?: repo.loadOlder() }
+    }
+
+    fun loadNewer(of: ChatWindow): Job = viewModelScope.launch(Dispatchers.Default) { of.loadNewer() }
+
+    /** A page that failed may be asked for again; the list does so at once where it is wanted. */
+    fun forgetPageErrors() {
+        repo.forgetOlderError()
+        window?.forgetErrors()
     }
 
     fun retryLoad() {
@@ -424,6 +583,7 @@ class ChatViewModel(
 
     private companion object {
         const val KEY_DRAFT = "draft"
+        const val KEY_NAMES = "draft-names"
 
         /** A scheduled time must be at least this far ahead (TalQ for desktop's time picker minimum). */
         const val MIN_LEAD_SECONDS = 60L

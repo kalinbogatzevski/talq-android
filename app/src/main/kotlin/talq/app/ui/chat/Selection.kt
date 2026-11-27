@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,13 +20,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -43,6 +48,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isSpecified
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -54,6 +64,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import talq.app.theme.TalqTheme
 import talq.app.ui.common.Avatar
+import talq.app.ui.room.FullBarMinWidth
 import talq.core.TalkError
 import talq.core.model.ChatMessage
 import talq.core.model.Room
@@ -61,16 +72,18 @@ import talq.core.model.isSelectableMessage
 import talq.core.repo.TalkSession
 
 /*
- * Several messages selected at once, then copied or forwarded: TalQ for desktop's selection bar
- * (`src/ui/SelectionBarWidget.*`: count, Forward, Copy, Cancel) and its conversation picker
+ * Several messages selected at once, then copied, forwarded or deleted: TalQ for desktop's selection bar
+ * (`src/ui/SelectionBarWidget.*`: count, Forward, Copy, Delete, Cancel) and its conversation picker
  * (`src/ui/ConversationPickerDialog.*`). What is copied and what is sent is decided in the core
- * (`talq.core.model.Forward.kt`); the room host holds the selection and runs the forward.
+ * (`talq.core.model.Forward.kt`), what may be deleted in its `MessageEdits.kt`; the room host holds the
+ * selection and runs the forward and the delete.
  */
 
 /**
  * The messages picked in the open tab. Touch and hold a message, then "Select", starts it; taps
  * add or take away; the last one taken away ends it, as on desktop. System notices and deleted
- * messages cannot be picked. While a forward runs it is [locked]: nothing is picked or copied.
+ * messages cannot be picked. While a forward or a delete runs it is [locked]: nothing is picked or
+ * copied (what the delete has deleted drops out, see [sync]).
  */
 @Stable
 class MessageSelection {
@@ -79,7 +92,7 @@ class MessageSelection {
     var active by mutableStateOf(false)
         private set
 
-    /** A forward is running with what was picked. */
+    /** A forward or a delete is running with what was picked. */
     var locked by mutableStateOf(false)
 
     val count: Int get() = picked.size
@@ -146,26 +159,76 @@ fun forwardResultText(total: Int, sent: Int, error: TalkError?): String {
     return if (sent == 0) "Not forwarded: $why" else "Forwarded $sent of $total: $why"
 }
 
-/** The top bar while messages are selected: the count, Copy, Forward (progress while it runs) and Cancel. */
+/**
+ * The top bar while messages are selected: the count, Copy, Forward, Delete and Cancel. Forward and Delete
+ * show progress while they run, and nothing else can be started then. A bar too narrow for the words
+ * (as the room's own header, [FullBarMinWidth]) shows the icons alone.
+ *
+ * @param canDelete every picked message may be deleted; [onDelete] null = no Delete here at all
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SelectionTopBar(count: Int, forwarding: Boolean, onCopy: () -> Unit, onForward: () -> Unit, onCancel: () -> Unit) {
-    TopAppBar(
-        title = { Text("$count selected", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        navigationIcon = {
-            IconButton(onClick = onCancel, enabled = !forwarding) { Icon(Icons.Filled.Close, contentDescription = "Cancel") }
-        },
-        actions = {
-            TextButton(onClick = onCopy, enabled = !forwarding) { Text("Copy") }
-            TextButton(onClick = onForward, enabled = !forwarding) {
-                if (forwarding) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
+fun SelectionTopBar(
+    count: Int,
+    forwarding: Boolean,
+    deleting: Boolean,
+    canDelete: Boolean,
+    onCopy: () -> Unit,
+    onForward: () -> Unit,
+    onDelete: (() -> Unit)?,
+    onCancel: () -> Unit,
+) {
+    val colors = TalqTheme.colors
+    val idle = !forwarding && !deleting
+    BoxWithConstraints {
+        val narrow = maxWidth < FullBarMinWidth
+        TopAppBar(
+            title = { Text("$count selected", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = {
+                IconButton(onClick = onCancel, enabled = idle) { Icon(Icons.Filled.Close, contentDescription = "Cancel") }
+            },
+            actions = {
+                SelectionAction("Copy", Icons.Outlined.ContentCopy, narrow, enabled = idle, onClick = onCopy)
+                SelectionAction("Forward", Icons.AutoMirrored.Filled.Forward, narrow, enabled = idle, busy = forwarding, onClick = onForward)
+                if (onDelete != null) {
+                    SelectionAction(
+                        "Delete", Icons.Outlined.Delete, narrow,
+                        enabled = idle && canDelete, busy = deleting, ink = colors.danger, onClick = onDelete,
+                    )
                 }
-                Text("Forward")
+            },
+        )
+    }
+}
+
+/** One action of the selection bar: its word, or ([narrow]) its icon alone; a ring while it is [busy]. */
+@Composable
+private fun SelectionAction(
+    label: String,
+    icon: ImageVector,
+    narrow: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    busy: Boolean = false,
+    ink: Color = Color.Unspecified,
+) {
+    if (narrow) {
+        IconButton(onClick = onClick, enabled = enabled) {
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = label }, strokeWidth = 2.dp)
+            } else {
+                Icon(icon, contentDescription = label, tint = if (enabled && ink.isSpecified) ink else LocalContentColor.current)
             }
-        },
-    )
+        }
+        return
+    }
+    TextButton(onClick = onClick, enabled = enabled) {
+        if (busy) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(label, color = if (enabled) ink else Color.Unspecified)
+    }
 }
 
 /**
@@ -189,8 +252,8 @@ fun SelectMark(selectable: Boolean, selected: Boolean, size: Dp = 22.dp) {
 
 /**
  * Where to forward: the conversation list (favourites, then the latest first), searchable by
- * name, without the conversation the messages come from, read-only ones and ones where the user
- * may not post (chat permission 128 missing; permissions 0 = not sent, kept). A tap picks and closes.
+ * name, without the conversation the messages come from and the ones where the server takes no post
+ * of the user's ([Room.takesPosts]). A tap picks and closes.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -200,8 +263,9 @@ fun ForwardSheet(session: TalkSession, fromToken: String, count: Int, onPick: (R
     var query by rememberSaveable { mutableStateOf("") }
     val needle = query.trim()
     val shown = remember(rooms, needle) {
+        val now = System.currentTimeMillis() / 1000
         rooms.filter {
-            it.token != fromToken && !it.isReadOnly && (it.permissions == 0 || it.permissions and 128 != 0) &&
+            it.token != fromToken && it.takesPosts(session.capabilities, now) &&
                 (needle.isEmpty() || it.displayName.contains(needle, ignoreCase = true))
         }
             .sortedWith(compareBy<Room> { it.isArchived }.thenByDescending { it.isFavorite }.thenByDescending { it.lastActivity })

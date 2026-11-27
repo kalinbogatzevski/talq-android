@@ -359,6 +359,18 @@ object SmokeMain {
             HpbInbound.Error("no_such_session", "gone"))
         check("parse bye", parseHpb("""{"type":"bye","bye":{}}""") == HpbInbound.Bye)
         check("parse garbage does not throw", parseHpb("not json") is HpbInbound.Other)
+        // JSON the reader itself takes (it refuses at 400 levels): only parseHpb's own limit turns it down.
+        val deep = "[".repeat(100) + "]".repeat(100)
+        check("parse: a frame nested too deep", parseHpb("""{"type":"bye","bye":{},"x":$deep}""") == HpbInbound.Other("invalid"))
+        check("parse: a text nested too deep",
+            parseHpb("""{"type":"message","message":{"data":"{\"type\":\"offer\",\"x\":$deep}"}}""") == HpbInbound.Other("message"))
+        val brackets = "[".repeat(200)
+        check("parse: brackets and a quote in a text are no nesting",
+            parseHpb("""{"type":"message","message":{"data":{"type":"offer","payload":{"sdp":"a\"$brackets"}}}}""") is HpbInbound.Signal)
+        val users = """[{"sessionId":"s","inCall":"\"5"}]"""
+        check("parse: a text with a quote for a number",
+            parseHpb("""{"type":"event","event":{"target":"participants","type":"update","update":{"all":"\"1","users":$users}}}""") is
+                HpbInbound.ParticipantsUpdate)
         check("hello carries the ticket", "\"ticket\":\"t1\"" in helloV1("https://nc/backend", "u1", "t1"))
 
         val b = TalkSession.open(credsB)

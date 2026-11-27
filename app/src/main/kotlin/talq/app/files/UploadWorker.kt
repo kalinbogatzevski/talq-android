@@ -60,15 +60,18 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             if (session != null) uploads.resumeInterrupted(session)
         }
 
-        var shown = -1 to -1
+        var shown = Triple(-1, -1, false)
         uploads.pending.takeWhile { list -> list.any { it.state.active } }.collect { list ->
             val active = list.filter { it.state.active }
-            val fraction = active.map { (it.state as? UploadState.Uploading)?.fraction ?: if (it.state is UploadState.Sharing) 1f else 0f }
+            // Being made smaller, and nothing else is on its way: that is what the bar shows.
+            val compressing = active.firstNotNullOfOrNull { it.state as? UploadState.Compressing }
+                ?.takeIf { active.none { f -> f.state is UploadState.Uploading || f.state is UploadState.Sharing } }
+            val fraction = compressing?.fraction ?: active.map { (it.state as? UploadState.Uploading)?.fraction ?: if (it.state is UploadState.Sharing) 1f else 0f }
                 .average().toFloat()
-            val now = active.size to (fraction * 20).toInt()
+            val now = Triple(active.size, (fraction * 20).toInt(), compressing != null)
             if (now != shown) {
                 shown = now
-                goForeground(notification(context, active.size, fraction))
+                goForeground(notification(context, active.size, fraction, compressing != null))
             }
         }
 
@@ -122,7 +125,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             )
         }
 
-        private fun notification(context: Context, count: Int, fraction: Float): Notification {
+        private fun notification(context: Context, count: Int, fraction: Float, compressing: Boolean = false): Notification {
             ensureChannel(context)
             val open = PendingIntent.getActivity(
                 context, 0,
@@ -132,7 +135,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             )
             return NotificationCompat.Builder(context, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat_talq)
-                .setContentTitle(if (count <= 1) "Uploading a file…" else "Uploading $count files…")
+                .setContentTitle(if (compressing) "Compressing a video…" else if (count <= 1) "Uploading a file…" else "Uploading $count files…")
                 .setProgress(100, (fraction * 100).toInt().coerceIn(0, 100), count == 0)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)

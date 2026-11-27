@@ -301,7 +301,7 @@ class NewConversationModel : ViewModel() {
 }
 
 /** The answer on screen (the previous one while asking again). */
-private fun shownPeople(search: PeopleSearch): List<PersonMatch> = when (search) {
+internal fun shownPeople(search: PeopleSearch): List<PersonMatch> = when (search) {
     is PeopleSearch.Found -> search.people
     is PeopleSearch.Searching -> search.previous
     else -> emptyList()
@@ -521,7 +521,7 @@ private fun PersonRow(
 
 /** A person's own picture; a group or circle gets a glyph in a quiet disc (they have no picture here). */
 @Composable
-private fun PersonAvatar(session: TalkSession, person: PersonMatch, size: Dp) {
+internal fun PersonAvatar(session: TalkSession, person: PersonMatch, size: Dp) {
     val colors = TalqTheme.colors
     if (person.isUser) {
         Avatar(

@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -47,9 +48,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import talq.app.theme.TalqTheme
 import talq.app.ui.common.StatusAvatar
 import talq.core.TalkError
@@ -58,6 +62,8 @@ import talq.core.model.MENTION_ROWS
 import talq.core.model.MentionCandidate
 import talq.core.model.MentionQuery
 import talq.core.model.MentionSpan
+import talq.core.model.RoomBot
+import talq.core.model.botMentions
 import talq.core.model.mentionSpans
 import talq.core.repo.TalkSession
 
@@ -71,6 +77,10 @@ import talq.core.repo.TalkSession
  *   shows at most 6 rows above the box: avatar (with the presence disc when the server sent a
  *   status), name, and `@id` ("Everyone" / "@all" for the whole conversation, as the server offers it).
  *   Like desktop the list shows right after the '@' too (the conversation's people).
+ * - After them come the conversation's enabled bots whose name holds what is typed, as "name (bot)",
+ *   inserted as desktop does (`fetchEnabledBots`; `botMentions`, `mentionToken`). Decided difference:
+ *   asked once per box, not on every word (nor where the server has no `bots-v1`, nor in a federated
+ *   conversation); a refusal means no bots and never empties the people.
  * - It hides on a space or anything else that ends the word, when the server finds nobody or the
  *   request fails (nothing is said), on Esc and on Back (until the word changes), while the box is
  *   read-only, and once a row is picked.
@@ -79,7 +89,8 @@ import talq.core.repo.TalkSession
  * - The box keeps that text (it is what is sent, drafted and saved) and DRAWS it as a pill with the
  *   name ([MentionDisplay]); the caret never stops inside it and one backspace takes the whole
  *   mention ([keepMentionsWhole]).
- * - Not ported: desktop also lists the conversation's bots (`fetchEnabledBots`); the app has no bots call.
+ * - A name that is not known yet (a draft back after the app was ended, a message scheduled elsewhere)
+ *   is asked of the conversation's participants ([resolveMentionNames]); unknown, it stays `@id`.
  */
 
 /** What the list shows: the answer for the "@word" starting at [start] (typed as [query] then). */
@@ -102,6 +113,24 @@ class MentionSuggester(
     private var asked: Pair<Int, String>? = null
     private var job: Job? = null
 
+    /** The conversation's enabled bots, asked for once (again only when the network failed). */
+    private var bots: Deferred<List<RoomBot>>? = null
+
+    /** Null where bots are not asked for: no `bots-v1`, a federated conversation, or one not known yet. */
+    private fun roomBots(): Deferred<List<RoomBot>>? {
+        if (!session.capabilities.bots || session.rooms.room(token)?.isFederated != false) return null
+        bots?.let { return it }
+        // Not part of the word's own job: the next key must not cut the request off.
+        return scope.async {
+            try {
+                session.client.bots(token).filter { it.isEnabled }
+            } catch (e: TalkError) {
+                if (e is TalkError.Network) bots = null
+                emptyList()
+            }
+        }.also { bots = it }
+    }
+
     /** The box's "@word" is now [q] (null: the caret is in none). */
     fun follow(q: MentionQuery?) {
         if (q == null) {
@@ -114,6 +143,7 @@ class MentionSuggester(
         if (key == asked) return
         asked = key
         job?.cancel()
+        val roomBots = roomBots()
         job = scope.launch {
             delay(MENTION_DEBOUNCE_MILLIS)
             val found = try {
@@ -121,23 +151,23 @@ class MentionSuggester(
             } catch (_: TalkError) {
                 emptyList()
             }
-            shown = MentionResult(q.start, q.query, found.take(MENTION_ROWS))
+            // A slow first answer about bots does not hold the people back.
+            val known = if (roomBots == null) emptyList() else withTimeoutOrNull(BOTS_WAIT_MILLIS) { roomBots.await() }.orEmpty()
+            shown = MentionResult(q.start, q.query, (found + botMentions(known, q.query)).take(MENTION_ROWS))
         }
     }
 
     /** [c] went into the text: the box shows it by its name from now on. */
     fun picked(c: MentionCandidate) {
-        drafts.nameMentions(mapOf(c.wireId to c.name))
+        // A bot's id is its name, and may be somebody's user id.
+        if (!c.isBot) drafts.nameMentions(mapOf(c.wireId to c.name))
         job?.cancel()
         asked = null
         shown = null
     }
 
     /** The names of the mentions in [text], by id (read in composition: a new name redraws the box). */
-    fun namesIn(text: String): Map<String, String> {
-        val spans = mentionSpans(text)
-        return if (spans.isEmpty()) emptyMap() else spans.associate { it.id to drafts.mentionName(it.id) }
-    }
+    fun namesIn(text: String): Map<String, String> = drafts.shownNames(text)
 
     /** [text] with its mentions as names, for a line that only shows it (the bubble on its way). */
     fun readable(text: String): String = drafts.readable(text)
@@ -147,6 +177,25 @@ class MentionSuggester(
     /** A person's own picture; empty for everyone else (a group, a guest, a federated user). */
     fun avatarUrl(c: MentionCandidate, dark: Boolean): String =
         if (c.isUser) session.client.userAvatarUrl(c.id, 64, dark) else ""
+}
+
+/** How long the people wait for the first answer about bots. */
+private const val BOTS_WAIT_MILLIS = 1_000L
+
+/**
+ * Finds the names of the mentions in [texts] that have none yet (`GET room/{token}/participants`; no
+ * request when there are none). Display only: the texts stay as they are, an id nobody there has keeps
+ * showing as `@id`, and a failure says nothing. Main thread.
+ */
+suspend fun resolveMentionNames(session: TalkSession, token: String, drafts: ComposerDrafts, texts: List<String>) {
+    val wanted = drafts.unnamed(texts)
+    if (wanted.isEmpty()) return
+    val people = try {
+        session.client.participants(token)
+    } catch (_: TalkError) {
+        return
+    }
+    drafts.nameMentions(people.filter { it.mentionId in wanted }.associate { it.mentionId to it.displayName })
 }
 
 /**
@@ -295,7 +344,11 @@ private fun MentionRow(c: MentionCandidate, highlighted: Boolean, suggester: Men
         hovered -> colors.bgHover
         else -> colors.bgSidebar
     }
-    val title = if (c.isEveryone) "Everyone" else c.name
+    val title = when {
+        c.isEveryone -> "Everyone"
+        c.isBot -> "${c.name} (bot)"
+        else -> c.name
+    }
     val subline = when {
         c.isEveryone -> "@all"
         c.source == "groups" -> "Group"
@@ -326,7 +379,12 @@ private fun MentionRow(c: MentionCandidate, highlighted: Boolean, suggester: Men
             )
         } else {
             Box(Modifier.size(32.dp).clip(CircleShape).background(colors.bgSecondary), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Groups, contentDescription = null, tint = colors.textSecondary, modifier = Modifier.size(18.dp))
+                Icon(
+                    if (c.isBot) Icons.Outlined.SmartToy else Icons.Outlined.Groups,
+                    contentDescription = null,
+                    tint = colors.textSecondary,
+                    modifier = Modifier.size(18.dp),
+                )
             }
         }
         Spacer(Modifier.width(12.dp))

@@ -1,6 +1,7 @@
 package talq.app.push
 
 import android.content.Context
+import android.os.PowerManager
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -26,9 +27,11 @@ import talq.app.ui.message.plainPreview
 import talq.core.TalkError
 import talq.core.WebPushRegistration
 import talq.core.WebPushResult
+import talq.core.model.ChatMessage
 import talq.core.model.NotificationLevel
 import talq.core.model.RoomType
 import talq.core.model.TalkNotification
+import talq.core.model.mentionsByName
 import talq.core.repo.TalkSession
 import java.time.OffsetDateTime
 
@@ -485,6 +488,10 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
      * The details ([showNotification]) need up to three requests, and nothing keeps a process
      * that a push started alive for them: without this the notification could be late or lost.
      * The detailed one replaces this one silently (same id).
+     *
+     * The alert it goes to ([kindOf]) is known at once in a one-to-one chat. In any other the push does not say
+     * whether it mentions the user, so it is put up among the other messages; where the user has set the two
+     * alerts differently, its sound waits for the details ([soundLater]).
      */
     private fun showAtOnce(push: PushPayload.Notify) {
         if (loggingOut) return
@@ -493,7 +500,7 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         }
         // A view of this conversation is on screen. Which topic the message is in is not known
         // yet, so whether it is the one being read is decided once the details are in.
-        if (content.token.isNotEmpty() && TalqNotifications.openChat?.token == content.token) return
+        if (content.aboutChat && TalqNotifications.openChat?.token == content.token) return
         // Possibly a muted conversation or topic: nothing is shown until that is known.
         if (content.aboutChat &&
             container.gate.quick(content.token, content.threadId) == NotificationGate.Quick.Wait
@@ -501,10 +508,41 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
             return
         }
         try {
-            TalqNotifications.show(appContext, content)
+            val later = !content.kindKnown && !TalqNotifications.messagesAlertAlike(appContext)
+            TalqNotifications.show(appContext, content, alert = if (later) Alert.Later else Alert.Once)
+            if (later) soundLater(content)
         } catch (e: Exception) {
             Log.w(TAG, "notification ${push.nid} could not be shown", e)
         }
+    }
+
+    /** Notifications put up without their sound, until it is known which alert they belong to. Main thread only. */
+    private val soundPending = HashSet<Long>()
+
+    /** Keeps the phone awake for the few seconds a sound waits: in its sleep no timer runs. */
+    private val awake: PowerManager.WakeLock? by lazy {
+        appContext.getSystemService(PowerManager::class.java)
+            ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "talq:alert")?.apply { setReferenceCounted(false) }
+    }
+
+    /**
+     * The sound of [content], just put up without one: the details make it ([soundNow]), on the alert they say. When
+     * they take too long it sounds as what it is for sure, another message, and not a second time after that. Where
+     * those make no sound it goes on waiting: the details may still find a mention.
+     */
+    private fun soundLater(content: NotificationContent) {
+        soundPending.add(content.nid)
+        awake?.acquire(SOUND_WAIT_MS + 500L)
+        container.scope.launch {
+            delay(SOUND_WAIT_MS)
+            if (content.nid !in soundPending || TalqNotifications.alertState(appContext, content.kind) != AlertState.On) return@launch
+            if (!gone(null) && TalqNotifications.isUp(appContext, content.nid)) soundNow(content)
+        }
+    }
+
+    /** It is known which alert [content] belongs to: the sound that waited for that, if one did. */
+    private fun soundNow(content: NotificationContent) {
+        if (soundPending.remove(content.nid)) TalqNotifications.show(appContext, content, alert = Alert.Now)
     }
 
     private suspend fun showNotification(push: PushPayload.Notify) {
@@ -513,10 +551,13 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
 
         val session = awaitSession()
         if (gone(session)) return dropped(push)
+        // Whether an unread message of the conversation names the user already; null = the list is not there yet.
+        var namedBefore: Boolean? = null
         // The conversation's newest messages, loaded alongside (one run per room at a time): a tap
         // on this notification then opens on them instead of a spinner. Not for the one on screen.
         if (session != null) {
             val early = describe(push, null, session)
+            namedBefore = session.rooms.room(early.token)?.unreadMentionDirect
             if (early.aboutChat && TalqNotifications.openChat?.token != early.token) session.prefetchChat(early.token)
         }
         // The conversation list, reloaded alongside: it says whether the conversation is muted
@@ -536,30 +577,45 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
                 Log.w(TAG, "notification ${push.nid} could not be fetched", e)
             }
         }
+        if (gone(session)) return dropped(push)
+        // Named or one-to-one is known now; whether it answers the user, only with the message. What was taken down
+        // meanwhile (muted elsewhere, read, swiped off) does not come back for its sound.
+        if (detail != null && push.nid in soundPending && TalqNotifications.isUp(appContext, push.nid)) {
+            val early = describe(push, detail, session)
+            if (early.kind == NotificationKind.Direct) soundNow(early.copy(topicKnown = early.threadId > 0 || !early.aboutChat))
+        }
         withTimeoutOrNull(ROOMS_TIMEOUT_MS) { roomsReload?.join() }
         var content = describe(push, detail, session)
         // Which topic the message is in: named by the notification, or asked from the message.
         // "In no topic" and "could not be found out" are different answers.
         var topicKnown = content.threadId > 0 || (session != null && !session.supportsTopics)
+        var message: ChatMessage? = null
         if (!topicKnown && session != null && content.token.isNotEmpty() && content.messageId > 0) {
-            var topicId = topicOf(session, content.token, content.messageId)
-            if (topicId == null && content.aboutChat && !gone(session) &&
+            message = messageOf(session, content.token, content.messageId)
+            if (message == null && content.aboutChat && !gone(session) &&
                 container.gate.hasSilencedTopics(session, content.token)
             ) {
                 // It decides whether this may be shown at all: one more go.
-                topicId = topicOf(session, content.token, content.messageId)
+                message = messageOf(session, content.token, content.messageId)
             }
+            val topicId = message?.topicId
             if (topicId != null) {
                 topicKnown = true
                 if (topicId > 0) {
                     content = content.copy(
                         threadId = topicId,
-                        topicTitle = session.topics(content.token).topic(topicId)?.thread?.title.orEmpty(),
+                        topicTitle = if (content.sensitive) "" else session.topics(content.token).topic(topicId)?.thread?.title.orEmpty(),
                     )
                 }
             }
         }
-        content = content.copy(topicKnown = topicKnown || !content.aboutChat)
+        // The message itself says whether it answers the user. Where it was not looked at, the conversation's own
+        // flag does when it has just come on (it stays on until the message is read).
+        val named = namedBefore == false && session?.rooms?.room(content.token)?.unreadMentionDirect == true
+        content = content.copy(
+            topicKnown = topicKnown || !content.aboutChat,
+            kind = kindOf(push, detail, session, content.token, message, named = message == null && named),
+        )
         // The requests above take seconds; signing out meanwhile empties the stored levels.
         if (gone(session)) return dropped(push)
         if (content.aboutChat) {
@@ -575,38 +631,86 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
             val verdict = container.gate.check(session, content.token, content.threadId)
             if (verdict.blocked || gone(session)) return dropped(push)
             val title = verdict.topic?.title.orEmpty()
-            if (content.topicTitle.isEmpty() && title.isNotEmpty()) content = content.copy(topicTitle = title)
+            if (content.topicTitle.isEmpty() && !content.sensitive) content = content.copy(topicTitle = title)
         }
+        soundNow(content)
         // Count first (briefly), so the number this notification carries includes its message.
         if (session != null) withTimeoutOrNull(RECOUNT_TIMEOUT_MS) { container.badge.refreshNow(session) }
         if (gone(session)) return dropped(push)
         val roomUnread = container.badge.roomCount(content.token)
             ?: session?.rooms?.room(content.token)?.takeIf { it.notificationLevel != NotificationLevel.NEVER }?.unreadMessages
             ?: 0
-        TalqNotifications.show(appContext, content, roomUnread)
+        TalqNotifications.show(appContext, content, roomUnread, container.messageActions.offered(session, content))
         container.badge.request()
     }
 
     /** Not shown after all: take the first, undetailed version down too, and count. */
     private fun dropped(push: PushPayload.Notify) {
+        soundPending.remove(push.nid)
         TalqNotifications.cancel(appContext, listOf(push.nid))
         if (!loggingOut) container.badge.request()
     }
 
     /**
-     * The topic [messageId] is in: 0 when it is in none, null when that could not be found out
-     * (no answer in time, a failed request, the message not in the answer).
+     * The message [messageId] itself, for the topic it is in ([ChatMessage.topicId], 0 = in none): null when that
+     * could not be found out (no answer in time, a failed request, the message not in the answer).
      */
-    private suspend fun topicOf(session: TalkSession, token: String, messageId: Long): Long? = try {
+    private suspend fun messageOf(session: TalkSession, token: String, messageId: Long): ChatMessage? = try {
         withTimeoutOrNull(TOPIC_LOOKUP_TIMEOUT_MS) {
             session.client.history(token, lastKnownMessageId = messageId, limit = 1, includeLastKnown = true)
-                .messages.firstOrNull { it.id == messageId }?.topicId
+                .messages.firstOrNull { it.id == messageId }
         }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
         Log.w(TAG, "topic of message $messageId could not be looked up", e)
         null
+    }
+
+    /**
+     * Which alert the notification belongs to; what is not known is another message.
+     *
+     * - [NotificationKind.Direct]: a message in a one-to-one chat, one that mentions the user by name, or an answer
+     *   to a message of the user's. The last two are TalQ for desktop's `mentionsUser` and `isReplyToUser`
+     *   (`src/core/ToastGatePolicy.h`), of the first only the name, and what Talk itself calls a direct mention
+     *   (`ChatManager::sendMessage`; the list's `unreadMentionDirect`).
+     * - [NotificationKind.Other]: everything else: @all, mentioned groups and teams, reactions (in a one-to-one chat
+     *   too), and what is not about a chat message (invitations, reminders, other apps of the server).
+     *
+     * The push holds the object type `chat` and a translated line for all of these, and the notification no subject
+     * in a fixed language either: it is told from the objects the line names and from the message. [message]: the
+     * message, where it was looked up (for its topic); [named]: the conversation's own flag has just come on.
+     */
+    private fun kindOf(
+        push: PushPayload.Notify,
+        detail: TalkNotification?,
+        session: TalkSession?,
+        token: String,
+        message: ChatMessage?,
+        named: Boolean,
+    ): NotificationKind {
+        if (push.objectType == "call") return NotificationKind.Call
+        if (!push.isTalk || push.objectType != "chat" || token.isEmpty()) return NotificationKind.Other
+        val subject = detail?.subjectRichParameters.orEmpty()
+        // A reaction is about a message of the user's own, and nobody is notified of a message of his own.
+        val reaction = "reaction" in subject || (message != null && session?.isMe(message.actorType, message.actorId) == true)
+        if (reaction) return NotificationKind.Other
+        val me = session?.user?.userId.orEmpty()
+        val callType = subject["call"]?.value("call-type").orEmpty()
+        val direct = when {
+            // Told by the notification, else by the list; from the push alone by the name on its first line.
+            detail == null && message == null -> container.gate.isDirectMessage(token, push.subject)
+            callType.isNotEmpty() -> callType == "one2one"
+            else -> session?.rooms?.room(token)?.isOneToOne == true
+        }
+        val answer = message?.quoted?.let { session?.isMe(it.actorType, it.actorId) } == true
+        return if (direct || answer || named || mentionsByName(detail?.messageRichParameters.orEmpty(), me) ||
+            mentionsByName(message?.parameters.orEmpty(), me)
+        ) {
+            NotificationKind.Direct
+        } else {
+            NotificationKind.Other
+        }
     }
 
     /**
@@ -635,11 +739,14 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
 
         val room = if (token.isNotEmpty()) session?.rooms?.room(token) else null
         val subjectObjects = detail?.subjectRichParameters.orEmpty()
+        // The server names neither the conversation nor the topic of one marked sensitive (`Notifier::parseChatMessage`).
+        val aboutChat = isTalk && push.objectType == "chat" && token.isNotEmpty()
+        // Not known (a chat this phone has never listed): as if it were, so no topic name and no shortcut go out.
+        val sensitive = container.gate.isSensitive(session, token) ?: aboutChat
         val title = subjectObjects["call"]?.name?.takeIf { it.isNotEmpty() }
-            ?: room?.displayName?.takeIf { it.isNotEmpty() }
+            ?: room?.displayName?.takeIf { it.isNotEmpty() && !sensitive }
             ?: Brand.appName(appContext)
         val sender = (subjectObjects["user"] ?: subjectObjects["actor"])?.name.orEmpty()
-        val aboutChat = isTalk && push.objectType == "chat" && token.isNotEmpty()
         // A chat message comes as its raw text (markdown and escapes included): show it as the
         // bubble would, unstyled, from the version with placeholders, so a name with "_" or "*"
         // in it (a file, a person) is not read as markdown. Other notifications are plain already.
@@ -647,17 +754,9 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         val body = if (aboutChat && rich.isNotEmpty()) plainPreview(rich, detail?.messageRichParameters.orEmpty(), oneLine = false)
         else detail?.message.orEmpty()
         val topicTitle =
-            if (threadId > 0 && token.isNotEmpty()) session?.topics(token)?.topic(threadId)?.thread?.title.orEmpty() else ""
+            if (threadId > 0 && token.isNotEmpty() && !sensitive) session?.topics(token)?.topic(threadId)?.thread?.title.orEmpty() else ""
 
-        val myId = session?.user?.userId
-        val mentionsMe = detail?.messageRichParameters.orEmpty().any { (key, obj) ->
-            key.startsWith("mention-") && (obj.type != "user" || obj.id == myId)
-        }
-        val kind = when {
-            push.objectType == "call" -> NotificationKind.Call
-            mentionsMe -> NotificationKind.Mention
-            else -> NotificationKind.Message
-        }
+        val kind = kindOf(push, detail, session, token, message = null, named = false)
         val oneToOne = room?.type == RoomType.ONE_TO_ONE || (room == null && sender.isNotEmpty() && sender == title)
 
         return NotificationContent(
@@ -674,6 +773,8 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
             whenMillis = parseTime(detail?.datetime),
             isGroup = !oneToOne,
             aboutChat = aboutChat,
+            kindKnown = detail != null || !aboutChat || kind == NotificationKind.Direct,
+            sensitive = sensitive,
         )
     }
 
@@ -742,6 +843,9 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         private const val TOPIC_LOOKUP_TIMEOUT_MS = 5_000L
         private const val ROOMS_TIMEOUT_MS = 6_000L
         private const val RECOUNT_TIMEOUT_MS = 2_000L
+
+        /** How long a sound waits for the details that say which alert it is. */
+        private const val SOUND_WAIT_MS = 3_000L
         private const val ANSWER_TIMEOUT_MS = 60_000L
         private const val PREFS = "push_route"
         private const val KEY_ROUTE = "route"

@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.MutableState
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.text.style.TextAlign
 import talq.app.shift.ErpLink
 import talq.app.Brand
 import talq.app.ui.call.CallInProgressBar
@@ -89,20 +88,26 @@ import androidx.lifecycle.compose.currentStateAsState
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import talq.app.SessionState
 import talq.app.appContainer
 import talq.app.appName
 import talq.app.folders.folderResultText
+import talq.app.status.OwnStatusUi
 import talq.app.theme.TalqColors
 import talq.app.theme.TalqTheme
+import talq.app.ui.adaptive.LocalTwoPane
 import talq.app.ui.common.Avatar
 import talq.app.ui.common.ConnectionLine
 import talq.app.ui.common.ConnectionState
 import talq.app.ui.common.connectionState
 import talq.app.ui.common.MessagePane
+import talq.app.ui.common.SavedLine
 import talq.app.ui.common.StatusAvatar
+import talq.app.ui.common.WAITING_FOR_SERVER
 import talq.app.ui.common.firstName
 import talq.app.ui.common.onSecondaryClick
 import talq.app.ui.common.relativeTime
+import talq.app.ui.common.savedState
 import talq.app.ui.common.userMessage
 import talq.app.ui.message.previewText
 import talq.app.ui.update.UpdateBanner
@@ -110,11 +115,14 @@ import talq.app.ui.update.showsUpdateBanner
 import talq.app.ui.message.topicColor
 import talq.app.ui.chat.ComposerDrafts
 import talq.app.ui.chat.sayAnywhere
+import talq.app.ui.room.RoomTab
 import talq.app.ui.status.OwnStatusSheet
 import talq.core.TalkError
 import talq.core.model.NotificationLevel
 import talq.core.model.Room
+import talq.core.model.RoomFilter
 import talq.core.model.RoomType
+import talq.core.repo.OutboxMessage
 import talq.core.repo.TalkSession
 import talq.core.shift.ShiftState
 import talq.core.folders.FolderRollup
@@ -122,14 +130,22 @@ import talq.core.folders.FolderSection
 import talq.core.folders.addToRollup
 import talq.core.folders.buildRoomSections
 import talq.core.folders.roomFolderMember
+import talq.core.repo.listedRoom
 
 /** How often the list is reloaded while it is on screen. */
 private const val REFRESH_MILLIS = 12_000L
+
+/** On a phone the list has made way for the conversation that was tapped by then. */
+private const val LEAVING_MILLIS = 1_000L
 
 /**
  * [search]: the search field's text, and [newChat]: the "+" sheet's model, both held by the caller
  * so both places that draw this list share them (see ChatSearch.kt, NewConversationSheet.kt).
  * [selectedToken]: the conversation open beside the list (wide layout), drawn selected.
+ *
+ * Until the server's list is there the rows are the saved ones (`AppContainer.saved`), also while [session] is
+ * not checked yet: they sort, filter, search and open like any others, and nothing else is offered on them.
+ * Their unread numbers, the presence and "Archived"'s and the folders' sums come with the server's list.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -137,7 +153,8 @@ fun ChatListScreen(
     session: TalkSession,
     search: MutableState<String>,
     newChat: NewConversationModel,
-    onOpenRoom: (token: String) -> Unit,
+    /** [draftTab]: the tab that holds the row's "Not sent:" or "Draft:" text (a `RoomTab` key or KEY_NEW_TOPIC); null without one. */
+    onOpenRoom: (token: String, draftTab: Long?) -> Unit,
     onOpenTopic: (token: String, topicId: Long) -> Unit,
     onOpenSettings: () -> Unit,
     /** Settings, scrolled to its Notifications section (the notice's Fix when push is not set up). */
@@ -145,9 +162,31 @@ fun ChatListScreen(
     onUnauthorized: () -> Unit,
     selectedToken: String? = null,
 ) {
-    val rooms by session.rooms.rooms.collectAsStateWithLifecycle()
+    val container = LocalContext.current.appContainer
+    val serverRooms by session.rooms.rooms.collectAsStateWithLifecycle()
     val load by session.rooms.state.collectAsStateWithLifecycle()
+    val start by container.saved.collectAsStateWithLifecycle()
+    val saved = start?.takeIf { !load.loaded && ComposerDrafts.accountOf(it.session) == ComposerDrafts.accountOf(session) }
+    val live = saved == null
+    val rooms = saved?.rooms ?: serverRooms
     val withTopics by session.roomsWithTopics.collectAsStateWithLifecycle()
+    // What of a chat's unread sits in topics on Never: its grey number, beside the coloured one. What was
+    // looked at here while a muted topic holds the read marker is in neither.
+    val silenced by session.silencedUnread.figures.collectAsStateWithLifecycle()
+    val unreadHere by session.unreadHere.collectAsStateWithLifecycle()
+    // "Sort by" and "Show" (ListSort.kt, ListFilter.kt), kept on the device. The list waits for them.
+    val listSort = LocalContext.current.appContainer.listSort
+    val sort by listSort.sort.collectAsStateWithLifecycle()
+    val filter by listSort.filter.collectAsStateWithLifecycle()
+    val orderKnown by listSort.known.collectAsStateWithLifecycle()
+    val beside = LocalTwoPane.current
+    // A phone's list fades out under the conversation that was tapped: for that moment it is the open one.
+    var leavingFor by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(leavingFor) {
+        if (leavingFor == null) return@LaunchedEffect
+        delay(LEAVING_MILLIS)
+        leavingFor = null
+    }
     // Shift state of colleagues, as the app-level service knows it. Reading only: the
     // service decides by itself when to ask the ERP.
     val shiftService = LocalContext.current.appContainer.shift
@@ -170,6 +209,8 @@ fun ChatListScreen(
     val folders = LocalContext.current.appContainer.folders
     val folderUi by folders.ui.collectAsStateWithLifecycle()
     val overlays = rememberFolderOverlays()
+    // Touch and hold (or right-click) a conversation: its menu (RoomMenu.kt).
+    val roomMenu = rememberRoomMenu()
     val appLabel = appName()
     // Your own status, shown and set from the header (TalQ for desktop's profile bar).
     val ownStatus = LocalContext.current.appContainer.ownStatus
@@ -181,27 +222,37 @@ fun ChatListScreen(
     val snackbar = remember { SnackbarHostState() }
     val say: (String) -> Unit = { text -> scope.launch { snackbar.showSnackbar(text) } }
 
-    // Reload while visible and at once on every return to the screen.
+    // Reload while visible and at once on every return to the screen. Not before the account is checked.
     LifecycleResumeEffect(session) {
-        session.rooms.startAutoRefresh(REFRESH_MILLIS)
+        if (session.checked) session.rooms.startAutoRefresh(REFRESH_MILLIS)
         onPauseOrDispose { session.rooms.stopAutoRefresh() }
     }
     LaunchedEffect(load.error) {
         if (load.error is TalkError.Unauthorized) onUnauthorized()
     }
 
+    val listed = remember(rooms, silenced, unreadHere) { rooms.map { listedRoom(it, silenced[it.token], unreadHere[it.token]) } }
+    val counted = remember(listed) { listed.map { it.room } }
+    val mutedOf = remember(listed) { listed.associate { it.room.token to it.muted } }
     // Archived chats are left out of the list, as in TalQ for desktop and Talk on the web; an
-    // "Archived" row at the end shows them on request (not saved: the list opens without them).
-    val sortedAll = remember(rooms) {
-        rooms.sortedWith(compareByDescending<Room> { it.isFavorite }.thenByDescending { it.lastActivity })
-    }
-    val sorted = remember(sortedAll) { sortedAll.filter { !it.isArchived } }
-    val archived = remember(sortedAll) { sortedAll.filter { it.isArchived } }
+    // "Archived" row at the end shows them on request (not saved: the list opens without them). It is there
+    // while all conversations are shown; "Show" can show them alone.
+    val listing = rememberRoomListing(counted, sort, filter, mutedOf, openToken = selectedToken ?: leavingFor, beside = beside)
+    // Unread numbers are the server's: the saved ones only give a row its place.
+    val sorted = remember(listing, live) { if (live) listing.main else listing.main.map { it.withoutUnread() } }
+    val archived = remember(listing, live) { if (live) listing.archived else listing.archived.map { it.withoutUnread() } }
+    val mutedShown = if (live) mutedOf else emptyMap()
     var showArchived by rememberSaveable { mutableStateOf(false) }
+    // What is shown anew starts at its top, like a search.
+    val show: (RoomFilter) -> Unit = {
+        listSort.set(it)
+        listState.requestScrollToItem(0)
+    }
     // The search (rules in ChatSearch.kt): names only, the rooms already held, as you type.
     var query by search
     val needle = remember(query) { searchFold(query.trim()) }
     val searching = needle.isNotEmpty()
+    val slide = rememberRowsSlide(sort, filter, searching)
     val foldedNames = remember(rooms) { rooms.associate { it.token to searchFold(it.displayName) } }
     val shown = remember(sorted, foldedNames, needle) {
         if (needle.isEmpty()) sorted else sorted.filter { foldedNames[it.token]?.contains(needle) == true }
@@ -220,7 +271,7 @@ fun ChatListScreen(
         newChat.consumeDone()
         startingChat = false
         focusManager.clearFocus()
-        onOpenRoom(newChatDone.token)
+        onOpenRoom(newChatDone.token, null)
         newChatDone.notice?.let { sayAnywhere(context, it) }
     }
     // Back empties the field first (the keyboard, when up, takes the first Back itself).
@@ -239,16 +290,30 @@ fun ChatListScreen(
     // In folders only when "Show folders" is on and a folder exists; flat as before otherwise.
     // Each folder takes its chats in the flat list's order (favourites stay on top inside it).
     // countMuted = false is desktop's default ("Count muted chats and topics" off) and the rule of
-    // the launcher number: a chat set to Never adds nothing to its closed folder's badge. A search
-    // shows every folder open and leaves out the ones without a match.
-    val sections = remember(shown, folderUi.state, folderUi.grouped, searching) {
-        if (folderUi.grouped) buildRoomSections(shown, folderUi.state, countMuted = false, searching = searching) else null
+    // the launcher number: what was muted adds nothing to its folder's coloured badge; it has a grey
+    // one. A search shows every folder open; it and "Show" leave out the ones without a match.
+    val filtering = searching || filter != RoomFilter.All
+    val sections = remember(shown, folderUi.state, folderUi.grouped, searching, filtering, mutedShown) {
+        if (folderUi.grouped) {
+            buildRoomSections(shown, folderUi.state, countMuted = false, searching = searching, filterActive = filtering) {
+                mutedShown[it.token] ?: 0
+            }
+        } else {
+            null
+        }
     }
-    // The "Archived" header counts like a folder's (a chat on Never adds nothing).
-    val archivedRollup = remember(shownArchived) {
+    // The one line in place of the rows: a search that found nothing, or nothing in what is shown.
+    val nothing: String? = when {
+        shown.isNotEmpty() || shownArchived.isNotEmpty() -> null
+        searching -> "No conversations match \"${query.trim()}\""
+        filter != RoomFilter.All -> emptyLine(filter)
+        else -> null
+    }
+    // The "Archived" header counts like a folder's.
+    val archivedRollup = remember(shownArchived, mutedShown) {
         shownArchived.fold(FolderRollup()) { r, room ->
-            val m = roomFolderMember(room, countMuted = false)
-            addToRollup(r, m.unread, m.mention, m.directMention)
+            val m = roomFolderMember(room, countMuted = false, mutedPart = mutedShown[room.token] ?: 0)
+            addToRollup(r, m.unread, m.mention, m.directMention, m.muted)
         }
     }
     val unpaired = erpLink is ErpLink.NotPaired || erpLink is ErpLink.Rejected
@@ -260,25 +325,29 @@ fun ChatListScreen(
     val link by network.link.collectAsStateWithLifecycle()
     val networkFailing = load.error is TalkError.Network
     val connection = connectionState(link, networkFailing)
-    val notifyProblem = rememberNotifyProblem(LocalContext.current.appContainer.pushRegistrar)
-    val noticeDismissed by LocalContext.current.appContainer.notifyNoticeDismissed.collectAsStateWithLifecycle()
+    // While the rows are the saved ones, what they wait for (the check of the account, then the list) says it all.
+    val check by container.sessionState.collectAsStateWithLifecycle()
+    val savedLine = if (live) null else savedState(link, (check as? SessionState.Unreachable)?.error ?: load.error)
+    val notifyNotices = LocalContext.current.appContainer.notifyNotices
     val noticeAccount = remember(session) { ComposerDrafts.accountOf(session) }
-    val notifyShown = notifyProblem != null && connection == null && !searching && noticeDismissed != noticeAccount
+    val notifyProblem = rememberNotifyProblem(LocalContext.current.appContainer.pushRegistrar, notifyNotices, noticeAccount)
+    val notifyShown = notifyProblem != null && connection == null && live && !searching
     // Only an error the connection line does not already tell gets the row in the list.
-    val listError = load.error?.takeIf { it !is TalkError.Network }
+    val listError = load.error?.takeIf { it !is TalkError.Network && live }
+    val drawn = rooms.isNotEmpty() && orderKnown
     // The key of the list's first row, in the order the list below draws them (null: no list).
     val topKey: String? = when {
-        rooms.isEmpty() -> null
+        !drawn -> null
         updateBanner && !searching -> "update"
         pairShown -> "pair"
         listError != null -> "error"
-        searching && shown.isEmpty() && shownArchived.isEmpty() -> "x:nomatch"
+        nothing != null -> "x:nomatch"
         sections == null -> shown.firstOrNull()?.token
         else -> sections.firstOrNull()?.let { sectionKey(it.section) }
-    } ?: if (rooms.isNotEmpty() && shownArchived.isNotEmpty()) "x:archived" else null
+    } ?: if (drawn && shownArchived.isNotEmpty()) "x:archived" else null
     // The first conversation the list draws (in folders: the first one of the first open folder).
     val topRoom: String? = when {
-        rooms.isEmpty() -> null
+        !drawn -> null
         sections == null -> shown.firstOrNull()?.token
         else -> sections.firstOrNull { !it.closed && it.members.isNotEmpty() }?.members?.first()?.token
     }
@@ -290,22 +359,32 @@ fun ChatListScreen(
     // frame), never against a finger or a fling. Scrolled further down: nothing moves. Saved, so
     // coming back to the list (or turning the phone) compares with what was shown before.
     val shownTop = rememberSaveable(saver = TopRow.Saver) { TopRow() }
+    val rowsDrawn = remember(shown, sections) { rowKeys(shown, sections) }
     SideEffect {
-        val changed = topKey != shownTop.key || topRoom != shownTop.room
+        // In "Unread" the first one also goes because it was read. What moves up then is no arrival.
+        val readAway = filter == RoomFilter.Unread && !searching
+        fun moved(now: String?, before: String?): Boolean = now != before &&
+            !(readAway && now != null && before != null && before !in rowsDrawn && now in shownTop.rows)
+        val changed = moved(topKey, shownTop.key) || moved(topRoom, shownTop.room)
         val known = shownTop.key != null
         shownTop.key = topKey
         shownTop.room = topRoom
+        shownTop.rows = rowsDrawn
         if (changed && known && topKey != null &&
             listState.firstVisibleItemIndex <= 2 && !listState.isScrollInProgress
         ) {
             listState.requestScrollToItem(0)
+        } else {
+            // ... nor does it go along with the row at the top of the screen when that one moves away.
+            val lead = listOf(updateBanner && !searching, pairShown, listError != null).count { it }
+            listState.keepRowsInPlace(rowsDrawn, lead)
         }
     }
     // The conversation open beside the list (wide layout) in a closed folder opens that folder,
     // as desktop does for a chat that is opened. Once per opening, not on the folders: closing
     // that folder afterwards keeps it closed, also when the device is turned (hence saved).
     var revealedFor by rememberSaveable { mutableStateOf<String?>(null) }
-    LaunchedEffect(selectedToken, rooms.isEmpty()) {
+    LaunchedEffect(session, selectedToken, serverRooms.isEmpty()) {
         val token = selectedToken
         if (token == null) {
             revealedFor = null
@@ -314,8 +393,9 @@ fun ChatListScreen(
         if (token == revealedFor || session.rooms.room(token) == null) return@LaunchedEffect
         revealedFor = token
         // While searching every folder already shows open: nothing is toggled (desktop's
-        // revealToken), so a pick from the results leaves the folders as they were.
-        if (!searching) folders.reveal(token)
+        // revealToken), so a pick from the results leaves the folders as they were. Nor for one that
+        // is not in the list ("Show" hides it, or it is archived): it would show nothing.
+        if (!searching && listShows(session, filter, token)) folders.reveal(token)
     }
     // Unsent text waiting in a conversation: its row says "Draft:" instead of the last message.
     // Not for the one open beside the list (its box is on screen): typing there changes nothing here.
@@ -324,6 +404,9 @@ fun ChatListScreen(
     val draftLines by remember(drafts, draftAccount, selectedToken) {
         derivedStateOf { drafts.previews(draftAccount, except = selectedToken) }
     }
+    // A text that was sent off and is not sent (waiting for the network, or for its Retry): the row says
+    // "Not sent:". It wins over "Draft:", and shows beside its open room too (it may be in another tab).
+    val unsent by session.unsent.collectAsStateWithLifecycle()
     // Keeps "12m" honest between reloads.
     val now by produceState(System.currentTimeMillis()) {
         while (true) {
@@ -337,17 +420,21 @@ fun ChatListScreen(
             Column {
                 ProfileBar(
                     session = session,
-                    status = statusUi,
-                    onSetStatus = {
+                    // Before the status is asked for: "…" where it will be, and nothing to tap.
+                    status = if (statusUi.available) statusUi else OwnStatusUi(available = session.capabilities.userStatus),
+                    onSetStatus = if (!statusUi.available) null else ({
                         // Not read yet (or the presets are missing): ask again while the sheet opens.
                         if (!statusUi.loaded || statusUi.predefined.isEmpty()) ownStatus.refresh()
                         editingStatus = true
-                    },
+                    }),
                 ) {
-                    IconButton(onClick = {
-                        newChat.reset()
-                        startingChat = true
-                    }) {
+                    IconButton(
+                        enabled = session.checked,
+                        onClick = {
+                            newChat.reset()
+                            startingChat = true
+                        },
+                    ) {
                         Icon(Icons.Filled.Add, contentDescription = "New conversation")
                     }
                     IconButton(onClick = onOpenSettings) {
@@ -355,19 +442,31 @@ fun ChatListScreen(
                     }
                 }
                 // Always visible, as on desktop: one tap to type, and it shows that search exists.
-                ChatSearchField(
-                    query = query,
-                    onQueryChange = { query = it },
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
-                )
+                // Beside it "Sort by" and "Show", under the gear; a changed order starts at the top, like a search.
+                Row(Modifier.padding(start = 16.dp, end = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ChatSearchField(query = query, onQueryChange = { query = it }, modifier = Modifier.weight(1f))
+                    SortButton(
+                        sort = sort,
+                        filter = filter,
+                        filters = offeredFilters(session.capabilities, filter),
+                        onSort = {
+                            listSort.set(it)
+                            listState.requestScrollToItem(0)
+                        },
+                        onFilter = show,
+                    )
+                }
+                // Also during a search, which looks inside what is shown.
+                if (filter != RoomFilter.All) FilterLine(filter, onShowAll = { show(RoomFilter.All) })
                 CallInProgressBar()
-                if (connection != null && rooms.isNotEmpty()) {
+                SavedLine(savedLine)
+                if (live && connection != null && rooms.isNotEmpty()) {
                     ConnectionLine(connection)
                 } else if (notifyShown) {
                     NotificationsNotice(
                         problem = notifyProblem,
                         onFix = { fixNotifications(context, notifyProblem, onOpenPushSettings) },
-                        onDismiss = { context.appContainer.notifyNoticeDismissed.value = noticeAccount },
+                        onDismiss = { notifyNotices.dismiss(noticeAccount, notifyProblem.state) },
                     )
                 }
             }
@@ -379,7 +478,7 @@ fun ChatListScreen(
             onRefresh = {
                 scope.launch {
                     pulling = true
-                    session.rooms.refresh()
+                    if (session.checked) session.rooms.refresh() else container.checkNow().join()
                     pulling = false
                 }
             },
@@ -388,7 +487,7 @@ fun ChatListScreen(
         ) {
             val error = load.error
             when {
-                rooms.isEmpty() && !load.loaded && error == null ->
+                !orderKnown || (rooms.isEmpty() && !load.loaded && error == null) ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
                     }
@@ -429,44 +528,48 @@ fun ChatListScreen(
                     if (listError != null) {
                         item(key = "error") { StaleBanner(listError.userMessage()) }
                     }
-                    if (searching && shown.isEmpty() && shownArchived.isEmpty()) {
+                    if (nothing != null) {
                         // "x:" cannot meet a room token ([a-z0-9] only). At the top: the keyboard
                         // covers the middle of the list.
                         item(key = "x:nomatch") {
-                            Text(
-                                text = "No conversations match \"${query.trim()}\"",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TalqTheme.colors.textSecondary,
-                                textAlign = TextAlign.Center,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 20.dp),
-                            )
+                            NothingShown(nothing, onShowAll = if (filter == RoomFilter.All) null else ({ show(RoomFilter.All) }))
                         }
                     }
                     // Opening a conversation puts the keyboard away (it would cover the room beside
                     // the list on a wide window).
                     val roomItem: @Composable (Room) -> Unit = { room ->
+                        val failed = unsent[room.token]
                         RoomRow(
                             session, room, now,
-                            hasTopics = room.token in withTopics,
+                            hasTopics = room.token in withTopics || (!live && room.lastMessageTopicId != 0L),
                             shift = shifts[room.partnerUserId]?.state ?: ShiftState.Unknown,
+                            mutedCount = mutedShown[room.token] ?: 0,
                             selected = room.token == selectedToken,
-                            draft = draftLines[room.token],
+                            draft = draftLines[room.token]?.text,
+                            notSent = failed?.let { drafts.preview(it.text) },
                             onClick = {
                                 focusManager.clearFocus()
-                                onOpenRoom(room.token)
+                                if (!beside) leavingFor = room.token
+                                // A row that says "Not sent:" or "Draft:" opens where that text waits.
+                                onOpenRoom(
+                                    room.token,
+                                    failed?.let { unsentTab(it, drafts, draftAccount, room.token) } ?: draftLines[room.token]?.tab,
+                                )
                             },
                             onOpenTopic = { id ->
                                 focusManager.clearFocus()
+                                if (!beside) leavingFor = room.token
                                 onOpenTopic(room.token, id)
                             },
-                            // "Move to folder", in the flat list too: it is where the first folder is made.
-                            onLongClick = if (folderUi.attached) ({ overlays.moveFor = room.token }) else null,
+                            // All of it is the server's to do.
+                            onLongClick = { if (live) roomMenu.menuFor = room.token else say(WAITING_FOR_SERVER) },
                         )
                     }
                     if (sections == null) {
-                        items(shown, key = { it.token }) { room -> roomItem(room) }
+                        items(shown, key = { it.token }) { room ->
+                            // Only here: in folders the rows would slide across the headers.
+                            Box(if (slide) Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null) else Modifier) { roomItem(room) }
+                        }
                     } else {
                         // "folder:" keys cannot meet a room token ([a-z0-9] only). A key twice would
                         // crash the list; folder ids are unique in every state the store holds, so
@@ -487,7 +590,7 @@ fun ChatListScreen(
                                         onToggle = if (searching) null else ({
                                             folderResultText(folders.toggle(section.folder.id), folderUi.readOnly, appLabel)?.let(say)
                                         }),
-                                        onLongPress = { overlays.menuFor = section.folder.id },
+                                        onLongPress = { if (live) overlays.menuFor = section.folder.id else say(WAITING_FOR_SERVER) },
                                     )
                                     FolderSection.Other -> FolderHeader(
                                         name = OTHER_SECTION_NAME,
@@ -527,26 +630,42 @@ fun ChatListScreen(
         }
     }
 
-    FolderOverlayHost(
-        overlays = overlays,
-        folders = folders,
-        ui = folderUi,
-        roomName = { token -> session.rooms.room(token)?.displayName },
-        say = say,
-    )
+    // What was open over the list when the app was ended is back with the server's list.
+    if (live) {
+        RoomMenuHost(
+            state = roomMenu,
+            session = session,
+            rooms = rooms,
+            // In the flat list too: it is where the first folder is made.
+            onMove = if (folderUi.attached) ({ token -> overlays.moveFor = token }) else null,
+        )
+        FolderOverlayHost(
+            overlays = overlays,
+            folders = folders,
+            ui = folderUi,
+            roomName = { token -> session.rooms.room(token)?.displayName },
+            say = say,
+        )
+    }
     if (editingStatus && statusUi.available) OwnStatusSheet(ownStatus) { editingStatus = false }
-    if (startingChat) NewConversationSheet(session, newChat) { startingChat = false }
+    if (startingChat && session.checked) NewConversationSheet(session, newChat) { startingChat = false }
 }
+
+/** [this] as a saved row shows it. */
+private fun Room.withoutUnread(): Room = copy(unreadMessages = 0, unreadMention = false, unreadMentionDirect = false)
 
 /** The first row's key and the first conversation the list showed, as of the last composition. Not state. */
 private class TopRow(var key: String? = null, var room: String? = null) {
+    /** The rows it showed ([rowKeys]); not saved. */
+    var rows: List<String> = emptyList()
+
     companion object {
         val Saver = listSaver<TopRow, String?>(save = { listOf(it.key, it.room) }, restore = { TopRow(it[0], it[1]) })
     }
 }
 
 /** A folder section's header key. "folder:" keys cannot meet a room token ([a-z0-9] only). */
-private fun sectionKey(section: FolderSection): String = when (section) {
+internal fun sectionKey(section: FolderSection): String = when (section) {
     is FolderSection.InFolder -> "folder:${section.folder.id}"
     FolderSection.Other -> "folder:other"
 }
@@ -618,7 +737,8 @@ private fun StaleBanner(message: String) {
 
 /**
  * [draft]: unsent text waiting in this conversation (one line), shown in place of the last message.
- * [onLongClick]: "Move to folder" (null while no account's folders are attached).
+ * [notSent]: a text of it that was sent off and is not sent (one line); it wins over [draft].
+ * [onLongClick]: the conversation's menu.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -628,17 +748,23 @@ private fun RoomRow(
     nowMillis: Long,
     hasTopics: Boolean,
     shift: ShiftState,
+    /** The part of the unread number that was muted: grey, the rest keeps the colours. */
+    mutedCount: Int,
     selected: Boolean,
     draft: String?,
+    notSent: String?,
     onClick: () -> Unit,
     onOpenTopic: (topicId: Long) -> Unit,
-    onLongClick: (() -> Unit)? = null,
+    onLongClick: () -> Unit,
 ) {
     val colors = TalqTheme.colors
     val context = LocalContext.current
     val dark = !TalqTheme.colors.isLight
     val muted = room.notificationLevel == NotificationLevel.NEVER
     val unread = room.unreadMessages > 0
+    val loudCount = room.unreadMessages - mutedCount
+    // Nothing unread here that was not muted: a muted chat, or one with news in muted topics only.
+    val quiet = muted || (mutedCount > 0 && loudCount <= 0)
     // The newest unread message sits in a topic: name the topic as a pill that opens it.
     val last = room.lastMessage
     val unreadTopic = last?.takeIf {
@@ -648,8 +774,12 @@ private fun RoomRow(
             // older unread message somewhere else): the pill would open a tab with nothing new.
             (session.unreadIfCreated(room.token)?.state?.value?.seenUpTo(it.topicId) ?: 0L) < it.id
     }
-    val preview = remember(room.lastMessage, colors, unreadTopic != null, draft) {
-        if (draft != null) draftLine(draft, colors) else previewLine(session, room, colors, withTopic = unreadTopic == null)
+    val preview = remember(room.lastMessage, colors, unreadTopic != null, draft, notSent) {
+        when {
+            notSent != null -> labelled("Not sent:", colors.danger, notSent)
+            draft != null -> labelled("Draft:", colors.accentText, draft)
+            else -> previewLine(session, room, colors, withTopic = unreadTopic == null)
+        }
     }
 
     // The open conversation (wide layout) is highlighted; its pills then take the list's own
@@ -673,7 +803,7 @@ private fun RoomRow(
             // A right-click opens what touch and hold opens.
             .onSecondaryClick(onLongClick)
             .combinedClickable(
-                onLongClickLabel = if (onLongClick != null) "Move to folder" else null,
+                onLongClickLabel = "Conversation menu",
                 onLongClick = onLongClick,
                 onClick = onClick,
             )
@@ -730,7 +860,7 @@ private fun RoomRow(
                 Text(
                     text = relativeTime(context, room.lastActivity, nowMillis),
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (unread && !muted) colors.accentText else colors.textMuted,
+                    color = if (unread && !quiet) colors.accentText else colors.textMuted,
                     maxLines = 1,
                 )
             }
@@ -766,23 +896,28 @@ private fun RoomRow(
                     )
                 }
                 // Who needs you: "@" + the count in red-orange when you were named, amber for a
-                // mention of everyone, the accent otherwise; a muted chat stays quiet (only a direct
-                // "@" still shows its colour). Desktop shows a muted chat no badge at all.
+                // mention of everyone, the accent otherwise; then, in grey, the count of what was
+                // muted (a muted chat, muted topics; only a direct "@" still shows its colour there).
+                // Desktop shows no number for what was muted.
                 if (room.unreadMention || unread) {
                     val fill = colors.unreadFill(room.unreadMention, room.unreadMentionDirect)
                     Row(
                         modifier = Modifier.clearAndSetSemantics {
-                            contentDescription = unreadWords(room.unreadMessages, room.unreadMention, room.unreadMentionDirect)
+                            contentDescription = unreadWords(loudCount, room.unreadMention, room.unreadMentionDirect, muted = mutedCount)
                         },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (room.unreadMention) {
                             Spacer(Modifier.width(6.dp))
-                            Badge("@", muted = muted && !room.unreadMentionDirect, mutedFill = chipFill, fill = fill)
+                            Badge("@", muted = quiet && !room.unreadMentionDirect, fill = fill)
                         }
-                        if (unread) {
+                        if (loudCount > 0) {
                             Spacer(Modifier.width(6.dp))
-                            Badge(if (room.unreadMessages > 999) "999+" else room.unreadMessages.toString(), muted, mutedFill = chipFill, fill = fill)
+                            Badge(countText(loudCount), muted = false, fill = fill)
+                        }
+                        if (mutedCount > 0) {
+                            Spacer(Modifier.width(6.dp))
+                            Badge(countText(mutedCount), muted = true)
                         }
                     }
                 }
@@ -832,13 +967,13 @@ private fun TopicPill(topicId: Long, title: String, fill: Color, modifier: Modif
 
 /**
  * Unread pill: [fill] (see [unreadFill]; [TalqColors.countFill] when null) when it wants
- * attention, the quiet [mutedFill] for a muted conversation. The ink is chosen against the fill it
+ * attention, grey ([TalqColors.mutedFill]) for what was muted. The ink is chosen against the fill it
  * sits on ([TalqColors.inkOn]), so the number reads on every theme.
  */
 @Composable
-internal fun Badge(text: String, muted: Boolean, mutedFill: Color, fill: Color? = null) {
+internal fun Badge(text: String, muted: Boolean, fill: Color? = null) {
     val colors = TalqTheme.colors
-    val ground = if (muted) mutedFill else fill ?: colors.countFill
+    val ground = if (muted) colors.mutedFill else fill ?: colors.countFill
     Box(
         modifier = Modifier
             .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
@@ -851,11 +986,14 @@ internal fun Badge(text: String, muted: Boolean, mutedFill: Color, fill: Color? 
             text = text,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
-            color = if (muted) colors.textSecondary else colors.inkOn(ground),
+            color = colors.inkOn(ground),
             maxLines = 1,
         )
     }
 }
+
+/** A count as its pill shows it: at most four characters, so a busy chat's number cannot widen its row's badges. */
+internal fun countText(count: Int): String = if (count > 999) "999+" else count.toString()
 
 /**
  * TalQ for desktop's three unread levels (SidebarPainter `paintUnreadBadge`): someone mentioned you
@@ -869,9 +1007,14 @@ internal fun TalqColors.unreadFill(mention: Boolean, direct: Boolean): Color = w
     else -> countFill
 }
 
-/** What the unread pills say to a screen reader (the colour is not the only sign either: "@"). */
-internal fun unreadWords(unread: Int, mention: Boolean, direct: Boolean): String {
-    val count = if (unread > 0) "$unread unread" else null
+/** What the unread pills say to a screen reader (the colour is not the only sign either: "@"); [muted]: the grey one. */
+internal fun unreadWords(unread: Int, mention: Boolean, direct: Boolean, muted: Int = 0): String {
+    val count = when {
+        unread > 0 && muted > 0 -> "$unread unread, $muted muted"
+        muted > 0 -> "$muted unread, muted"
+        unread > 0 -> "$unread unread"
+        else -> null
+    }
     val who = when {
         direct -> "you are mentioned"
         mention -> "with a mention"
@@ -880,11 +1023,18 @@ internal fun unreadWords(unread: Int, mention: Boolean, direct: Boolean): String
     return listOfNotNull(count, who).joinToString(", ").replaceFirstChar { it.uppercase() }
 }
 
-/** "Draft: text", the label in the accent ink (as text), the typed text as any preview. */
-private fun draftLine(text: String, colors: TalqColors): AnnotatedString = buildAnnotatedString {
-    withStyle(SpanStyle(color = colors.accentText, fontWeight = FontWeight.Medium)) { append("Draft:") }
+/** "Draft: text" / "Not sent: text": the [label] in its own ink, the typed text as any preview. */
+private fun labelled(label: String, ink: Color, text: String): AnnotatedString = buildAnnotatedString {
+    withStyle(SpanStyle(color = ink, fontWeight = FontWeight.Medium)) { append(label) }
     append(" ")
     append(text)
+}
+
+/** The tab an unsent text is shown in: its topic, the topic it starts, else General (the whole chat in a room without topics). */
+private fun unsentTab(o: OutboxMessage, drafts: ComposerDrafts, account: String, token: String): Long = when {
+    o.threadId > 0 -> o.threadId
+    drafts.newTopic(ComposerDrafts.Key(account, token, RoomTab.KEY_NEW_TOPIC))?.sending == o.referenceId -> RoomTab.KEY_NEW_TOPIC
+    else -> RoomTab.KEY_GENERAL
 }
 
 /**

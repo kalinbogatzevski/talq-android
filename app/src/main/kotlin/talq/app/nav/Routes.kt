@@ -22,8 +22,9 @@ data object DiagnosticsRoute
 /**
  * An open conversation: one back-stack entry, whatever tab is showing inside it.
  *
- * - [tab]: a [RoomTab] key (-1 whole chat, 0 General, >0 a topic), or [REMEMBERED] to open on
- *   the tab the user last had open there (General when there is none).
+ * - [tab]: a [RoomTab] key (0 General, >0 a topic; -1, the whole chat, is General), [RoomTab.KEY_NEW_TOPIC]
+ *   for the topic being started there, or [REMEMBERED] to open on the tab the user last had open there
+ *   (General when there is none). A room without topics shows its whole chat whatever this says.
  * - [messageId]: the message to scroll to in that tab (from a notification).
  *
  * Build it through `NavHostController.openRoom`, the one way into a conversation.

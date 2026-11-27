@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Conversations in the share sheet of other apps: the shortcuts of share/ChatShortcuts.kt carry
+     this category, and Android hands what was shared to ShareActivity with the shortcut's id. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="talq.app.files.ShareActivity">
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="*/*" />
+        <category android:name="talq.app.category.CHAT_SHARE_TARGET" />
+    </share-target>
+</shortcuts>

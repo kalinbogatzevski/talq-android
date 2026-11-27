@@ -48,7 +48,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import talq.app.appContainer
 import talq.app.theme.TalqTheme
-import talq.app.ui.common.authorizedImage
+import talq.app.ui.chat.sayAnywhere
+import talq.app.ui.common.LocalPicturesFromPhone
+import talq.app.ui.common.WAITING_FOR_SERVER
+import talq.app.ui.common.rememberPicture
 import talq.core.model.RichObject
 import talq.core.repo.TalkSession
 
@@ -163,7 +166,6 @@ fun PlayMark(modifier: Modifier = Modifier, size: Int = 46) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VideoAttachment(file: RichObject, session: TalkSession, onClick: () -> Unit, onLongPress: () -> Unit) {
-    val context = LocalContext.current
     val ratio = if (file.width > 0 && file.height > 0) (file.width.toFloat() / file.height).coerceIn(0.6f, 2.2f) else 16f / 9f
     Box(
         modifier = Modifier
@@ -177,7 +179,7 @@ fun VideoAttachment(file: RichObject, session: TalkSession, onClick: () -> Unit,
     ) {
         if (file.previewAvailable) {
             val url = session.client.filePreviewUrl(file.id, 720, 720)
-            val request = remember(url) { authorizedImage(context, url, session.client.authorizationHeader) }
+            val request = rememberPicture(url, session.client.authorizationHeader)
             AsyncImage(model = request, contentDescription = file.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
         val fetching = downloadProgress(file.id)
@@ -205,12 +207,17 @@ fun VoiceCard(file: RichObject, voiceMessage: Boolean, onLongPress: () -> Unit, 
     val state = mine
     // Long-press Save / Share, or the fallback when it cannot be streamed.
     val fetching = downloadProgress(file.id)
+    // Nothing plays before the account is checked.
+    val waiting = LocalPicturesFromPhone.current
     Row(
         modifier = modifier
             .padding(vertical = 3.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(colors.bgPrimary.copy(alpha = 0.5f))
-            .combinedClickable(onClick = { voice.toggle(file) }, onLongClick = onLongPress)
+            .combinedClickable(
+                onClick = { if (waiting) sayAnywhere(context, WAITING_FOR_SERVER) else voice.toggle(file) },
+                onLongClick = onLongPress,
+            )
             .padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

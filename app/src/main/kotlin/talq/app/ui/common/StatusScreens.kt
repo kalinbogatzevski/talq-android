@@ -16,25 +16,36 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import talq.core.TalkError
+
+/** What the phone itself knows is there sooner: nothing turns for so short a moment. */
+private const val SPINNER_MILLIS = 300L
 
 /** Shown for the moment it takes to read stored credentials and greet the server. */
 @Composable
 fun LoadingScreen() {
+    val late by produceState(false) {
+        delay(SPINNER_MILLIS)
+        value = true
+    }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
+            if (late) CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
         }
     }
 }
 
-/** Signed in on disk, but the server did not answer at start. */
+/** Signed in on disk, but the server did not answer at start. [loggingOut]: the sign-out runs. */
 @Composable
-fun UnreachableScreen(error: TalkError, onRetry: () -> Unit, onLogout: () -> Unit) {
+fun UnreachableScreen(error: TalkError, loggingOut: Boolean, onRetry: () -> Unit, onLogout: () -> Unit) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier.fillMaxSize().systemBarsPadding().padding(32.dp),
@@ -49,10 +60,20 @@ fun UnreachableScreen(error: TalkError, onRetry: () -> Unit, onLogout: () -> Uni
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
+            Spacer(Modifier.height(8.dp))
+            // What is underneath: for the person who reports it.
+            Text(
+                error.technical(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
             Spacer(Modifier.height(24.dp))
-            Button(onClick = onRetry) { Text("Try again") }
+            Button(onClick = onRetry, enabled = !loggingOut) { Text("Try again") }
             Spacer(Modifier.height(4.dp))
-            TextButton(onClick = onLogout) { Text("Log out") }
+            TextButton(onClick = onLogout, enabled = !loggingOut) { Text(if (loggingOut) "Logging out…" else "Log out") }
         }
     }
 }

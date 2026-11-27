@@ -38,6 +38,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -82,17 +83,19 @@ import talq.app.ui.adaptive.LocalTwoPane
 import talq.app.ui.chat.SelectMark
 import talq.app.ui.common.Avatar
 import talq.app.ui.common.UiLocale
-import talq.app.ui.common.authorizedImage
 import talq.app.ui.common.clockPattern
 import talq.app.ui.common.onSecondaryClick
+import talq.app.ui.common.rememberPicture
 import talq.app.ui.common.BUBBLE_PREVIEW_PX
 import talq.app.ui.common.thumbnailKey
 import talq.app.ui.common.userMessage
+import talq.core.TalkError
 import talq.core.model.ChatMessage
 import talq.core.model.RichObject
 import talq.core.model.isSelectableMessage
 import talq.core.repo.OutboxMessage
 import talq.core.repo.OutboxStatus
+import talq.core.repo.OutboxStop
 import talq.core.repo.TalkSession
 
 /** The topic a message belongs to, for the chip shown in the whole-chat view. */
@@ -180,6 +183,8 @@ fun MessageRow(
     selecting: Boolean = false,
     selected: Boolean = false,
     onToggleSelect: () -> Unit = {},
+    /** The message its quote stands for is being loaded: the quote turns and takes no tap meanwhile. */
+    quoteLoading: Boolean = false,
 ) {
     val colors = TalqTheme.colors
     val m = item.message
@@ -249,7 +254,7 @@ fun MessageRow(
                                 .padding(horizontal = 10.dp, vertical = 7.dp),
                         ) {
                             if (topicChip != null) TopicChipRow(topicChip, onOpenTopic)
-                            BubbleBody(m, session, onQuoteClick, onOpenImage, onOpenFile, onLongPress)
+                            BubbleBody(m, session, quoteLoading, onQuoteClick, onOpenImage, onOpenFile, onLongPress)
                             Row(
                                 modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -273,7 +278,7 @@ fun MessageRow(
                                 }
                             }
                         }
-                        if (m.reactions.isNotEmpty()) ReactionChips(m, onReaction)
+                        if (m.reactions.isNotEmpty()) ReactionChips(m, onReaction, onLongPress)
                     }
                     if (!mine) Spacer(Modifier.width(24.dp))
                 }
@@ -301,6 +306,7 @@ fun MessageRow(
 private fun BubbleBody(
     m: ChatMessage,
     session: TalkSession,
+    quoteLoading: Boolean,
     onQuoteClick: (Long) -> Unit,
     onOpenImage: (RichObject) -> Unit,
     onOpenFile: (RichObject) -> Unit,
@@ -316,7 +322,7 @@ private fun BubbleBody(
         )
         return
     }
-    m.quoted?.let { QuoteBlock(it, onClick = { onQuoteClick(it.id) }, onLongPress = onLongPress) }
+    m.quoted?.let { QuoteBlock(it, onClick = { if (!quoteLoading) onQuoteClick(it.id) }, onLongPress = onLongPress, loading = quoteLoading) }
     if (m.quoted == null && m.parentDeleted) {
         Text("Replied to a deleted message", style = MaterialTheme.typography.labelSmall, color = colors.textMuted)
     }
@@ -396,7 +402,7 @@ private fun TopicChipRow(chip: TopicChip, onOpenTopic: (Long) -> Unit) {
 // actions; otherwise an image-only message could only be long-pressed on its thin padding.
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun QuoteBlock(quoted: ChatMessage, onClick: () -> Unit, onLongPress: () -> Unit) {
+private fun QuoteBlock(quoted: ChatMessage, onClick: () -> Unit, onLongPress: () -> Unit, loading: Boolean = false) {
     val colors = TalqTheme.colors
     Row(
         modifier = Modifier
@@ -404,17 +410,25 @@ private fun QuoteBlock(quoted: ChatMessage, onClick: () -> Unit, onLongPress: ()
             .clip(RoundedCornerShape(6.dp))
             .background(colors.bgPrimary.copy(alpha = 0.45f))
             .combinedClickable(onClick = onClick, onLongClick = onLongPress)
+            .semantics { if (loading) stateDescription = "Loading" }
             .height(IntrinsicSize.Min),
     ) {
         Box(Modifier.width(3.dp).fillMaxHeight().background(colors.accent))
         Column(Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
-            Text(
-                quoted.actorDisplayName.ifBlank { "Guest" },
-                style = MaterialTheme.typography.labelMedium,
-                color = colors.accentText,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    quoted.actorDisplayName.ifBlank { "Guest" },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.accentText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (loading) {
+                    Spacer(Modifier.width(6.dp))
+                    CircularProgressIndicator(Modifier.size(12.dp), color = colors.accentText, strokeWidth = 1.5.dp)
+                }
+            }
             Text(
                 text = previewText(quoted),
                 style = MaterialTheme.typography.bodySmall,
@@ -435,10 +449,9 @@ fun previewText(m: ChatMessage): String = when {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ImageAttachment(file: RichObject, session: TalkSession, onClick: () -> Unit, onLongPress: () -> Unit) {
-    val context = LocalContext.current
     val url = session.client.filePreviewUrl(file.id, BUBBLE_PREVIEW_PX, BUBBLE_PREVIEW_PX)
     // An exact key: the viewer shows this copy at once while the sharp one loads.
-    val request = remember(url) { authorizedImage(context, url, session.client.authorizationHeader, memoryKey = thumbnailKey(url)) }
+    val request = rememberPicture(url, session.client.authorizationHeader, memoryKey = thumbnailKey(url))
     val ratio = if (file.width > 0 && file.height > 0) (file.width.toFloat() / file.height).coerceIn(0.6f, 2.2f) else 4f / 3f
     Box(contentAlignment = Alignment.Center) {
         AsyncImage(
@@ -459,9 +472,10 @@ private fun ImageAttachment(file: RichObject, session: TalkSession, onClick: () 
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/** The reactions under a bubble: a tap gives or takes back one's own, touch and hold opens the message's actions. */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
-private fun ReactionChips(m: ChatMessage, onReaction: (String) -> Unit) {
+private fun ReactionChips(m: ChatMessage, onReaction: (String) -> Unit, onLongPress: () -> Unit) {
     val colors = TalqTheme.colors
     FlowRow(
         modifier = Modifier.padding(top = 3.dp, bottom = 2.dp),
@@ -475,7 +489,7 @@ private fun ReactionChips(m: ChatMessage, onReaction: (String) -> Unit) {
                     .clip(CircleShape)
                     .background(if (own) colors.accentSoft else colors.bgSecondary)
                     .then(if (own) Modifier.border(1.dp, colors.accentText.copy(alpha = 0.5f), CircleShape) else Modifier)
-                    .clickable { onReaction(emoji) }
+                    .combinedClickable(onClick = { onReaction(emoji) }, onLongClick = onLongPress)
                     .padding(horizontal = 8.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -494,7 +508,15 @@ private fun ReactionChips(m: ChatMessage, onReaction: (String) -> Unit) {
 
 /** A message on its way out, or one that did not make it: never dropped, always retryable. */
 @Composable
-fun PendingRow(outbox: OutboxMessage, onRetry: () -> Unit, onDiscard: () -> Unit, text: String = outbox.text) {
+fun PendingRow(
+    outbox: OutboxMessage,
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit,
+    text: String = outbox.text,
+    discardLabel: String = "Delete",
+    /** Puts it back into the box; null where that is not offered. */
+    onEdit: (() -> Unit)? = null,
+) {
     val colors = TalqTheme.colors
     val failed = outbox.status == OutboxStatus.FAILED
     Column(
@@ -527,18 +549,31 @@ fun PendingRow(outbox: OutboxMessage, onRetry: () -> Unit, onDiscard: () -> Unit
                 Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = colors.danger, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(5.dp))
                 Text(
-                    "Not sent. " + (outbox.error?.userMessage() ?: ""),
+                    notSentLine(outbox),
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.danger,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
             }
             Row {
-                TextButton(onClick = onDiscard) { Text("Delete", color = colors.textSecondary) }
+                TextButton(onClick = onDiscard) { Text(discardLabel, color = colors.textSecondary) }
+                if (onEdit != null) TextButton(onClick = onEdit) { Text("Edit") }
                 TextButton(onClick = onRetry) { Text("Retry") }
             }
         }
     }
+}
+
+/** One line about a text that is not sent: whether it goes by itself, or why it does not. */
+internal fun notSentLine(outbox: OutboxMessage): String = when {
+    outbox.waiting && outbox.error is TalkError.Network -> "Not sent. Waiting for network."
+    outbox.waiting -> "Not sent. Trying again soon."
+    outbox.stop == OutboxStop.UNCLEAR -> "Not sure it was sent. Retry sends it again."
+    outbox.stop == OutboxStop.SPENT -> "Not sent after several tries."
+    outbox.quoteGone -> "Not sent: the quoted message is gone."
+    else -> "Not sent. " + (outbox.error?.userMessage() ?: "")
 }
 
 /** Drag a message to the right to quote it. The reply arrow fades in under the finger. */

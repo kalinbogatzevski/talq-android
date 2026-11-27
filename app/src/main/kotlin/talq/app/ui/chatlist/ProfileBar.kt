@@ -35,15 +35,16 @@ import talq.core.repo.TalkSession
  * The conversation list's header, TalQ for desktop's profile bar (MainWindow.cpp, "User profile
  * header"): your avatar with your own status disc, your name and under it the status readout.
  * Tapping any of the three opens the status sheet ([onSetStatus]), as desktop's avatar and pill
- * do. Without the server's user status app there is no readout and nothing to tap. [actions] are
- * the bar's buttons on the right.
+ * do. Without the server's user status app there is no readout and nothing to tap; while the account is
+ * not checked yet ([onSetStatus] null) the readout waits ("…") and there is nothing to tap either.
+ * [actions] are the bar's buttons on the right.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileBar(
     session: TalkSession,
     status: OwnStatusUi,
-    onSetStatus: () -> Unit,
+    onSetStatus: (() -> Unit)?,
     actions: @Composable RowScope.() -> Unit,
 ) {
     val name = session.user.displayName.ifEmpty { session.user.userId }
@@ -59,7 +60,7 @@ fun ProfileBar(
                 modifier = Modifier
                     .offset(x = (-6).dp)
                     .then(
-                        if (status.available) {
+                        if (status.available && onSetStatus != null) {
                             Modifier
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable(role = Role.Button, onClickLabel = "Set your status", onClick = onSetStatus)

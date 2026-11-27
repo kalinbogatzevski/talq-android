@@ -75,6 +75,10 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Recent conversations in the share sheet (share/ChatShortcuts.kt): where a tap on one goes. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
 
         <!-- The share target ("Share" in another app, then TalQ). The only exported component
@@ -144,6 +148,11 @@
         <!-- Decline and Hang up from the call notifications. -->
         <receiver
             android:name=".call.CallActionReceiver"
+            android:exported="false" />
+
+        <!-- Reply and Mark as read from the message notifications. -->
+        <receiver
+            android:name=".push.MessageActionReceiver"
             android:exported="false" />
 
         <!-- WorkManager's foreground service, given the type Android 14+ asks for. -->

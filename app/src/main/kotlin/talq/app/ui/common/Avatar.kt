@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -21,8 +22,16 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
+import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import talq.app.theme.AvatarFills
+
+/**
+ * True while the account is not checked yet: an avatar (or a picture in a chat) is one the phone has, else the
+ * initial (or nothing). Nothing is asked of the server with a password that may be dead (each such request counts as
+ * a failed sign-in there).
+ */
+val LocalPicturesFromPhone = compositionLocalOf { false }
 
 /**
  * A round avatar loaded from the server with the account's credentials. Until the image
@@ -39,22 +48,20 @@ fun Avatar(
     modifier: Modifier = Modifier,
     size: Dp = 48.dp,
 ) {
-    val fill = AvatarFills[(name.hashCode() and 0x7fffffff) % AvatarFills.size]
+    val fill = avatarFill(name)
     Box(
         modifier = modifier.size(size).clip(CircleShape).background(fill),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = initial(name),
+            text = avatarInitial(name),
             color = Color.White,
             fontSize = (size.value * 0.42f).sp,
             fontWeight = FontWeight.SemiBold,
         )
         if (url.isNotEmpty()) {
-            val context = LocalContext.current
-            val request = remember(url, authorization) { authorizedImage(context, url, authorization) }
             AsyncImage(
-                model = request,
+                model = rememberPicture(url, authorization),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
@@ -89,6 +96,17 @@ fun authorizedImage(
         }
         .build()
 
+/** [authorizedImage] for a picture on screen: from the phone alone where [LocalPicturesFromPhone] says so. */
+@Composable
+fun rememberPicture(url: String, authorization: String, memoryKey: String? = null): ImageRequest {
+    val context = LocalContext.current
+    val fromPhone = LocalPicturesFromPhone.current
+    return remember(url, authorization, memoryKey, fromPhone) {
+        val image = authorizedImage(context, url, authorization, memoryKey)
+        if (fromPhone) image.newBuilder().networkCachePolicy(CachePolicy.DISABLED).build() else image
+    }
+}
+
 /**
  * The memory-cache key of a picture's thumbnail: its preview URL, set as the exact key by the chat
  * bubble (720) and the shared-files grid (360), so the full-screen viewer can show that copy at
@@ -102,7 +120,11 @@ const val BUBBLE_PREVIEW_PX = 720
 /** The preview size of a picture in the shared-files media grid. */
 const val GRID_PREVIEW_PX = 360
 
-private fun initial(name: String): String {
+/** The stable colour behind [name]'s initial. */
+internal fun avatarFill(name: String): Color = AvatarFills[(name.hashCode() and 0x7fffffff) % AvatarFills.size]
+
+/** What stands for [name] while there is no picture. */
+internal fun avatarInitial(name: String): String {
     val trimmed = name.trim()
     if (trimmed.isEmpty()) return "?"
     val end = trimmed.offsetByCodePoints(0, 1)

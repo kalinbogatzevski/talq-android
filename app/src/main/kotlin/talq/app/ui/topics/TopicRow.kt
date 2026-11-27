@@ -1,12 +1,12 @@
 package talq.app.ui.topics
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,12 +24,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import talq.app.theme.TalqTheme
+import talq.app.ui.chatlist.Badge
+import talq.app.ui.chatlist.unreadFill
+import talq.app.ui.chatlist.unreadWords
 import talq.app.ui.common.firstName
+import talq.app.ui.common.onSecondaryClick
 import talq.app.ui.message.previewText
 import talq.core.model.ChatMessage
 import talq.core.repo.TalkSession
@@ -43,8 +49,11 @@ internal fun previewLine(session: TalkSession, m: ChatMessage): String {
 }
 
 /**
- * One row of a topic list: disc, title, preview, time and unread marks. Used by the topics sheet.
+ * One row of a topic list: disc, title, preview, time and unread marks. Used by the topics sheet. A
+ * muted topic is dimmed, its unread marks are grey (except a mention of the user by name). [onMenu]
+ * (touch and hold, a right-click): the topic's chip menu.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun TopicRow(
     letter: String,
@@ -53,34 +62,34 @@ internal fun TopicRow(
     title: String,
     preview: String,
     time: String,
-    unreadCount: Int,
-    unreadDot: Boolean,
-    mentioned: Boolean,
+    unread: TabUnread,
     muted: Boolean,
     onClick: () -> Unit,
+    onMenu: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = TalqTheme.colors
-    val unread = unreadCount > 0 || unreadDot
+    val bold = unread.count > 0 || unread.dot
+    val dim = if (muted) Modifier.alpha(0.6f) else Modifier
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .alpha(if (muted) 0.6f else 1f)
+            .onSecondaryClick(onMenu)
+            .combinedClickable(onClick = onClick, onLongClick = onMenu)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(46.dp).clip(CircleShape).background(fill), contentAlignment = Alignment.Center) {
+        Box(dim.size(46.dp).clip(CircleShape).background(fill), contentAlignment = Alignment.Center) {
             Text(letter, color = letterInk, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(dim, verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = if (unread) FontWeight.Bold else FontWeight.Medium,
+                        fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
                         color = colors.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -95,7 +104,7 @@ internal fun TopicRow(
                 Text(
                     text = time,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (unread && !muted) colors.accentText else colors.textMuted,
+                    color = if (bold && !muted) colors.accentText else colors.textMuted,
                     maxLines = 1,
                 )
             }
@@ -107,41 +116,29 @@ internal fun TopicRow(
                     color = colors.textSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    modifier = dim.weight(1f),
                 )
-                if (mentioned) {
-                    Spacer(Modifier.width(6.dp))
-                    CountBadge("@", muted = false)
-                }
-                if (unreadCount > 0) {
-                    Spacer(Modifier.width(6.dp))
-                    CountBadge(if (unreadCount > 99) "99+" else unreadCount.toString(), muted)
-                } else if (unreadDot) {
+                // The conversation list's marks and colours (its row's `unreadFill`).
+                if (unread.mentioned || unread.count > 0) {
+                    val badgeFill = colors.unreadFill(unread.mentioned, unread.direct)
+                    Row(
+                        Modifier.clearAndSetSemantics { contentDescription = unreadWords(unread.count, unread.mentioned, unread.direct) },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (unread.mentioned) {
+                            Spacer(Modifier.width(6.dp))
+                            Badge("@", muted = muted && !unread.direct, fill = badgeFill)
+                        }
+                        if (unread.count > 0) {
+                            Spacer(Modifier.width(6.dp))
+                            Badge(if (unread.count > 99) "99+" else unread.count.toString(), muted, fill = badgeFill)
+                        }
+                    }
+                } else if (unread.dot) {
                     Spacer(Modifier.width(6.dp))
                     Box(Modifier.size(10.dp).clip(CircleShape).background(if (muted) colors.textMuted else colors.accent))
                 }
             }
         }
-    }
-}
-
-@Composable
-internal fun CountBadge(text: String, muted: Boolean) {
-    val colors = TalqTheme.colors
-    Box(
-        modifier = Modifier
-            .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
-            .clip(CircleShape)
-            .background(if (muted) colors.bgSelected else colors.countFill)
-            .padding(horizontal = 7.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = if (muted) colors.textSecondary else colors.inkOn(colors.countFill),
-            maxLines = 1,
-        )
     }
 }

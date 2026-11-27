@@ -108,8 +108,8 @@ android {
         applicationId = "io.github.kalinbogatzevski.talq"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.9.2"
+        versionCode = 30
+        versionName = "0.10.0"
         // Calls bring libwebrtc's native library (12 MB for arm64, 7 MB for 32-bit ARM, more
         // for x86). Phones and tablets are ARM; x86 builds would only serve emulators and a few
         // Chromebooks, at three times the size.
@@ -273,5 +273,8 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.datasource.okhttp)
     implementation(libs.media3.ui)
+    // Videos made smaller before they are sent.
+    implementation(libs.media3.transformer)
+    implementation(libs.media3.effect)
     debugImplementation(libs.compose.ui.tooling)
 }

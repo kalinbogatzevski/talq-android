@@ -10,10 +10,17 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.Headers
 import io.ktor.http.HttpMethod
+import io.ktor.http.content.OutgoingContent
 import io.ktor.http.content.TextContent
 import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
+import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.writeFully
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -35,6 +42,8 @@ import talq.core.model.PersonMatch
 import talq.core.model.PredefinedStatus
 import talq.core.model.ReactionActor
 import talq.core.model.Room
+import talq.core.model.RoomBot
+import talq.core.model.RoomParticipant
 import talq.core.model.ScheduledMessage
 import talq.core.model.TalkCapabilities
 import talq.core.model.TalkNotification
@@ -45,6 +54,7 @@ import talq.core.net.asArray
 import talq.core.net.asObject
 import talq.core.net.arr
 import talq.core.net.strings
+import talq.core.net.int
 import talq.core.net.long
 import talq.core.net.newTalkHttpClient
 import talq.core.net.obj
@@ -92,10 +102,14 @@ class TalkClient(
     serverUrl: String,
     val loginName: String,
     private val appPassword: String,
-    private val http: HttpClient = newTalkHttpClient(),
+    /** Null: this client sends nothing, every request is a [TalkError.Network] (see `TalkSession.unchecked`). */
+    private val engine: HttpClient? = newTalkHttpClient(),
 ) {
-    constructor(credentials: Credentials, http: HttpClient = newTalkHttpClient()) :
-        this(credentials.server, credentials.loginName, credentials.appPassword, http)
+    constructor(credentials: Credentials, engine: HttpClient? = newTalkHttpClient()) :
+        this(credentials.server, credentials.loginName, credentials.appPassword, engine)
+
+    private val http: HttpClient
+        get() = engine ?: throw TalkError.Network(IllegalStateException("the account is not checked yet"))
 
     val serverUrl: String = normalizeServerUrl(serverUrl)
 
@@ -103,13 +117,16 @@ class TalkClient(
     val authorizationHeader: String =
         "Basic " + kotlin.io.encoding.Base64.Default.encode("$loginName:$appPassword".encodeToByteArray())
 
-    fun close() = http.close()
+    fun close() {
+        engine?.close()
+    }
 
     // ---------------------------------------------------------------- transport
 
     /**
      * One OCS request. Returns the answer for ANY status; only transport failures throw.
-     * Use [ocs] unless non-2xx statuses carry meaning for the caller.
+     * Use [ocs] unless non-2xx statuses carry meaning for the caller. [once]: the HTTP engine must not
+     * put the request on the wire a second time by itself (see [OnceJson]).
      */
     suspend fun ocsRaw(
         method: HttpMethod,
@@ -117,6 +134,7 @@ class TalkClient(
         query: Map<String, Any?> = emptyMap(),
         body: JsonObject? = null,
         timeoutMillis: Long? = null,
+        once: Boolean = false,
     ): OcsResponse {
         val response = try {
             http.request("$serverUrl/ocs/v2.php/${path.trimStart('/')}") {
@@ -128,7 +146,7 @@ class TalkClient(
                 for ((k, v) in query) {
                     if (v is Iterable<*>) v.forEach { if (it != null) parameter(k, it) } else if (v != null) parameter(k, v)
                 }
-                if (body != null) setBody(TextContent(body.toString(), ContentType.Application.Json))
+                if (body != null) setBody(if (once) OnceJson(body.toString()) else TextContent(body.toString(), ContentType.Application.Json))
                 if (timeoutMillis != null) timeout {
                     requestTimeoutMillis = timeoutMillis
                     socketTimeoutMillis = timeoutMillis
@@ -175,8 +193,9 @@ class TalkClient(
         body: JsonObject? = null,
         timeoutMillis: Long? = null,
         allowNotModified: Boolean = false,
+        once: Boolean = false,
     ): OcsResponse {
-        val r = ocsRaw(method, path, query, body, timeoutMillis)
+        val r = ocsRaw(method, path, query, body, timeoutMillis, once)
         if (r.isSuccess || (allowNotModified && r.status == 304)) return r
         throw errorFor(r)
     }
@@ -189,11 +208,19 @@ class TalkClient(
     private fun OcsResponse.objectData(what: String): JsonObject =
         data.asObject() ?: throw TalkError.Protocol("$what: expected an object")
 
+    /**
+     * The list in a 2xx answer. An empty body or somebody else's JSON (a proxy, a gateway) is NOT an empty
+     * list: read as one, an unsent text counts as provably not in the chat and goes a second time, and the
+     * drafts of every conversation "no longer listed" go (desktop's `probeToken` asks for the same).
+     */
+    private fun OcsResponse.list(what: String): JsonArray =
+        data as? JsonArray ?: throw TalkError.Protocol("$what: expected a list")
+
     private fun OcsResponse.messages(): List<ChatMessage> =
-        data.asArray().mapNotNull { it.asObject() }.map { ChatMessage.fromJson(it) }.sortedBy { it.id }
+        list("messages").mapNotNull { it.asObject() }.map { ChatMessage.fromJson(it) }.sortedBy { it.id }
 
     private fun OcsResponse.threads(): List<TalkThreadInfo> =
-        data.asArray().mapNotNull { it.asObject() }.map { TalkThreadInfo.fromJson(it) }
+        list("topics").mapNotNull { it.asObject() }.map { TalkThreadInfo.fromJson(it) }
 
     // ---------------------------------------------------------------- calls
 
@@ -298,6 +325,24 @@ class TalkClient(
         ocs(HttpMethod.Delete, "core/apppassword")
     }
 
+    /**
+     * Signing out: the server forgets this phone's push subscription ([pushMillis] at most, best effort) and then the
+     * app password. True: the password is dead, also when the server did not know it any more. Throws nothing but
+     * a cancellation.
+     */
+    suspend fun signOff(pushMillis: Long): Boolean = try {
+        try {
+            withTimeoutOrNull(pushMillis) { webPushUnregister() }
+        } catch (e: TalkError.Unauthorized) {
+            throw e
+        } catch (_: TalkError) {
+        }
+        revokeAppPassword()
+        true
+    } catch (e: TalkError) {
+        e is TalkError.Unauthorized
+    }
+
     // ---------------------------------------------------------------- own status (user_status app, capability `user_status`)
 
     /** The user's own status; null when the server has none for them yet (404). */
@@ -352,7 +397,7 @@ class TalkClient(
         ocs(
             HttpMethod.Get, "apps/spreed/api/v4/room",
             mapOf("noStatusUpdate" to if (noStatusUpdate) 1 else 0, "includeStatus" to if (includeStatus) "true" else null),
-        ).data.asArray().mapNotNull { it.asObject() }.map { Room.fromJson(it) }
+        ).list("conversations").mapNotNull { it.asObject() }.map { Room.fromJson(it) }
 
     suspend fun room(token: String): Room =
         Room.fromJson(ocs(HttpMethod.Get, "apps/spreed/api/v4/room/${seg(token)}").objectData("room"))
@@ -360,15 +405,17 @@ class TalkClient(
     /**
      * People to start a conversation with, as TalQ for desktop asks Nextcloud's autocomplete
      * (ApiClient::searchNcUsers): `itemType=call` with `itemId=new`, share types 0 user, 1 group
-     * and 7 circle, at most 25. Only users, groups and circles are kept.
+     * and 7 circle, at most 25. Only users, groups and circles are kept. [itemId] a conversation's
+     * token: people to add to it, and the server leaves out who is in it already (Talk's autocomplete
+     * listener; whoever only followed its public link is listed, to be added for good).
      */
-    suspend fun searchPeople(search: String): List<PersonMatch> =
+    suspend fun searchPeople(search: String, itemId: String = "new"): List<PersonMatch> =
         ocs(
             HttpMethod.Get, "core/autocomplete/get",
             mapOf(
                 "search" to search,
                 "itemType" to "call",
-                "itemId" to "new",
+                "itemId" to itemId,
                 "shareTypes[]" to listOf(0, 1, 7),
                 "limit" to 25,
             ),
@@ -400,6 +447,70 @@ class TalkClient(
                 details = o.str("details"),
             )
         }.filter { isMentionable(it) }.distinctBy { it.key }
+
+    /**
+     * The bots known in [token], enabled or not (capability `bots-v1`), as TalQ for desktop's
+     * ApiClient::fetchEnabledBots asks. Local conversations only; the server may refuse whoever may
+     * not manage the conversation.
+     */
+    suspend fun bots(token: String): List<RoomBot> =
+        ocs(HttpMethod.Get, "apps/spreed/api/v1/bot/${seg(token)}")
+            .data.asArray().mapNotNull { it.asObject() }
+            .map { RoomBot(it.long("id"), it.str("name"), it.int("state")) }
+            .filter { it.id != 0L }
+
+    /**
+     * Who is in [token], as TalQ for desktop's ApiClient::fetchRoomParticipants asks; [includeStatus]
+     * adds the users' presence (not in a very large conversation). 403: a channel's list, for anyone but
+     * its moderators; 412: behind a lobby; 404: the user is not in the conversation any more.
+     */
+    suspend fun participants(token: String, includeStatus: Boolean = false): List<RoomParticipant> =
+        // A large answer, asked for from screens: not read on their thread.
+        withContext(Dispatchers.Default) {
+            ocs(
+                HttpMethod.Get, "apps/spreed/api/v4/room/${seg(token)}/participants",
+                mapOf("includeStatus" to if (includeStatus) "true" else null),
+            ).data.asArray().mapNotNull { it.asObject() }.map { o ->
+                RoomParticipant(
+                    actorType = o.str("actorType"),
+                    actorId = o.str("actorId"),
+                    displayName = o.str("displayName"),
+                    attendeeId = o.long("attendeeId"),
+                    participantType = o.int("participantType"),
+                    status = o.str("status"),
+                )
+            }
+        }
+
+    /**
+     * Take [attendeeId] ([RoomParticipant.attendeeId]) out of a conversation: moderators only, never an
+     * owner (403 `owner`); 404 `participant` when they are not in it any more. A group or team takes its
+     * members along (not the moderators, nor who is in another group or team of the conversation). Local
+     * conversations only, like the two below; the id goes in the body, as TalQ for desktop sends it
+     * (ApiClient::removeRoomParticipant, promoteModerator, demoteModerator).
+     */
+    suspend fun removeAttendee(token: String, attendeeId: Long) {
+        ocs(
+            HttpMethod.Delete, "apps/spreed/api/v4/room/${seg(token)}/attendees",
+            body = buildJsonObject { put("attendeeId", attendeeId) },
+        )
+    }
+
+    /** Make a user or guest a moderator. 400 when they are one already, 403 for oneself or without the right. */
+    suspend fun promoteModerator(token: String, attendeeId: Long) {
+        ocs(
+            HttpMethod.Post, "apps/spreed/api/v4/room/${seg(token)}/moderators",
+            body = buildJsonObject { put("attendeeId", attendeeId) },
+        )
+    }
+
+    /** Make a moderator (never an owner) an ordinary member again. Refused like [promoteModerator]. */
+    suspend fun demoteModerator(token: String, attendeeId: Long) {
+        ocs(
+            HttpMethod.Delete, "apps/spreed/api/v4/room/${seg(token)}/moderators",
+            body = buildJsonObject { put("attendeeId", attendeeId) },
+        )
+    }
 
     /**
      * Make a conversation and return its token (TalQ for desktop's ApiClient::createRoom, nothing
@@ -434,6 +545,42 @@ class TalkClient(
     suspend fun noteToSelf(): Room =
         Room.fromJson(ocs(HttpMethod.Get, "apps/spreed/api/v4/room/note-to-self").objectData("note to self"))
 
+    /** Favourite or not (capability `favorites`): the conversation itself is the whole request (desktop's ApiClient::setFavorite). */
+    suspend fun setFavorite(token: String, on: Boolean) = roomFlag(token, "favorite", on)
+
+    /** Archived or not (capability `archived-conversations-v2`; desktop's ApiClient::setArchived). */
+    suspend fun setArchived(token: String, on: Boolean) = roomFlag(token, "archive", on)
+
+    /** Important or not (capability `important-conversations`; desktop's ApiClient::setImportant). */
+    suspend fun setImportant(token: String, on: Boolean) = roomFlag(token, "important", on)
+
+    /** POST sets, DELETE takes back. The answer (the room) is not used. */
+    private suspend fun roomFlag(token: String, flag: String, on: Boolean) {
+        val path = "apps/spreed/api/v4/room/${seg(token)}/$flag"
+        if (on) ocs(HttpMethod.Post, path, body = buildJsonObject {}) else ocs(HttpMethod.Delete, path)
+    }
+
+    /**
+     * What the conversation notifies the user of, a [talq.core.model.NotificationLevel] (capability
+     * `notification-levels`). POST, as conversation.md says (desktop sends PUT).
+     */
+    suspend fun setNotificationLevel(token: String, level: Int) {
+        ocs(HttpMethod.Post, "apps/spreed/api/v4/room/${seg(token)}/notify", body = buildJsonObject { put("level", level) })
+    }
+
+    /** Ring for calls here or not (capability `notification-calls`; level 1 or 0). */
+    suspend fun setNotificationCalls(token: String, on: Boolean) {
+        ocs(
+            HttpMethod.Post, "apps/spreed/api/v4/room/${seg(token)}/notify-calls",
+            body = buildJsonObject { put("level", if (on) 1 else 0) },
+        )
+    }
+
+    /** Take the user out of the conversation for good. A refusal (400) names its reason: `last-moderator`, `announcement`. */
+    suspend fun leaveRoom(token: String) {
+        ocs(HttpMethod.Delete, "apps/spreed/api/v4/room/${seg(token)}/participants/self")
+    }
+
     // ---------------------------------------------------------------- chat (v1)
 
     /**
@@ -458,6 +605,36 @@ class TalkClient(
                 "noStatusUpdate" to 1,
                 "lastKnownMessageId" to lastKnownMessageId.takeIf { it > 0 },
                 "includeLastKnown" to if (includeLastKnown) 1 else null,
+                "threadId" to threadId.takeIf { it > 0 },
+            ),
+            allowNotModified = true,
+        ),
+    )
+
+    /**
+     * The messages right after [lastKnownMessageId], oldest first, at most [limit]: a page of the history
+     * read towards the newest, not the live poll ([pollMessages]): it answers at once. With [threadId] > 0
+     * only that topic's. `lastGiven` is null when there is nothing newer. Like [history] it never moves the
+     * read marker and never dismisses notifications.
+     *
+     * Together with [history] (`includeLastKnown`) this is what `GET chat/{token}/{id}/context` gives. That
+     * route is not called: it leaves the read marker alone too, but its second half runs with
+     * `markNotificationsAsRead` on and no way to turn it off (`ChatController::getMessageContext` ->
+     * `ChatManager::waitForNewMessages` -> `Notifier::markMentionNotificationsRead`), which takes down every
+     * notification of the conversation on all the user's devices, also of messages nobody has seen.
+     */
+    suspend fun newer(token: String, lastKnownMessageId: Long, limit: Int = 100, threadId: Long = 0): ChatPage = chatPage(
+        ocs(
+            HttpMethod.Get, "apps/spreed/api/v1/chat/${seg(token)}",
+            mapOf(
+                "lookIntoFuture" to 1,
+                "timeout" to 0,
+                "limit" to limit,
+                "setReadMarker" to 0,
+                "markNotificationsAsRead" to 0,
+                "noStatusUpdate" to 1,
+                "includeLastKnown" to 0,
+                "lastKnownMessageId" to lastKnownMessageId,
                 "threadId" to threadId.takeIf { it > 0 },
             ),
             allowNotModified = true,
@@ -513,7 +690,10 @@ class TalkClient(
      * - [threadId] > 0: the message is posted INTO that topic.
      * - [replyTo] > 0: the message quotes that message. A quote alone does not put the message
      *   in a topic; inside a topic send both.
-     * - [referenceId]: echoed back on the message, used to match an outbox entry to its result.
+     * - [referenceId]: echoed back on the message, used to match an outbox entry to its result. The
+     *   server does NOT take it as a key: the same request twice stores two messages, so the engine
+     *   sends this one once (a connection that breaks after it went out is a failure, not a replay;
+     *   desktop's `ApiClient::isRetryableTransportError` is the same rule).
      */
     suspend fun sendMessage(
         token: String,
@@ -531,7 +711,7 @@ class TalkClient(
             if (threadTitle.isNotEmpty()) put("threadTitle", threadTitle) else if (threadId > 0) put("threadId", threadId)
             if (silent) put("silent", true)
         }
-        val r = ocs(HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}", body = body)
+        val r = ocs(HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}", body = body, once = true)
         return ChatMessage.fromJson(r.objectData("sent message"))
     }
 
@@ -596,6 +776,8 @@ class TalkClient(
                 if (silent) put("silent", true)
                 if (threadId > 0) put("threadId", threadId)
             },
+            // The server has no key for it either: the same request twice is two messages.
+            once = true,
         )
     }
 
@@ -628,7 +810,17 @@ class TalkClient(
      */
     suspend fun markRead(token: String, lastReadMessage: Long? = null): Room? {
         val body = buildJsonObject { if (lastReadMessage != null) put("lastReadMessage", lastReadMessage) }
-        val r = ocs(HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}/read", body = body)
+        return answeredRoom(token, ocs(HttpMethod.Post, "apps/spreed/api/v1/chat/${seg(token)}/read", body = body))
+    }
+
+    /**
+     * Mark the chat as unread (capability `chat-unread`): the server sets the marker to the message before
+     * the conversation's newest one. Answers the room as it is then, like [markRead], else null.
+     */
+    suspend fun markUnread(token: String): Room? =
+        answeredRoom(token, ocs(HttpMethod.Delete, "apps/spreed/api/v1/chat/${seg(token)}/read"))
+
+    private fun answeredRoom(token: String, r: OcsResponse): Room? {
         val room = r.data.asObject()?.takeIf { it.str("token") == token } ?: return null
         return runCatching { Room.fromJson(room) }.getOrNull()
     }
@@ -802,6 +994,19 @@ class TalkClient(
         if (actorType == "users") userAvatarUrl(actorId, size, dark) else ""
 
     private fun seg(s: String): String = s.encodeURLPathPart()
+
+    /**
+     * A JSON body the engine can send one time only. A body it holds as bytes is put on the wire again
+     * by itself when the connection breaks after the request went out (OkHttp's `recover`; Ktor leaves
+     * `retryOnConnectionFailure` on); a streamed one is not, unless the request provably never left.
+     */
+    private class OnceJson(text: String) : OutgoingContent.WriteChannelContent() {
+        private val bytes = text.encodeToByteArray()
+        override val contentLength: Long = bytes.size.toLong()
+        override val contentType: ContentType = ContentType.Application.Json
+
+        override suspend fun writeTo(channel: ByteWriteChannel) = channel.writeFully(bytes)
+    }
 
     companion object {
         private const val USER_STATUS = "apps/user_status/api/v1/user_status"

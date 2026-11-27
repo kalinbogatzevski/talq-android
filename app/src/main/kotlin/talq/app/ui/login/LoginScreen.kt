@@ -57,6 +57,8 @@ fun LoginScreen() {
     val container = context.appContainer
     val model: LoginViewModel = viewModel { LoginViewModel(container, Brand.appName(context.applicationContext)) }
     val state by model.state.collectAsStateWithLifecycle()
+    // What the sign-out before could not do.
+    val note by container.signOutNote.collectAsStateWithLifecycle()
     val appName = appName()
 
     LaunchedEffect(state.browserUrl) {
@@ -94,6 +96,10 @@ fun LoginScreen() {
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                note?.let { line ->
+                    Spacer(Modifier.height(16.dp))
+                    Text(line, style = MaterialTheme.typography.bodyMedium, color = TalqTheme.colors.danger)
+                }
                 Spacer(Modifier.height(28.dp))
                 // A branded build signs in to its built-in server: no field to edit or select.
                 if (Brand.isBranded) {

@@ -56,6 +56,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.browser.customtabs.CustomTabsIntent
@@ -68,7 +70,10 @@ import talq.app.appContainer
 import talq.app.data.ThemeChoice
 import talq.app.theme.colorsFor
 import talq.app.appName
+import talq.app.push.AlertState
+import talq.app.push.NotificationKind
 import talq.app.push.PushRegistrar
+import talq.app.push.TalqNotifications
 import talq.app.ui.update.updateHowTo
 import talq.app.update.UpdateState
 import talq.app.push.PushStatus
@@ -76,9 +81,12 @@ import talq.app.shift.ErpLink
 import talq.app.shift.ShiftStatusService
 import talq.app.theme.TalqTheme
 import talq.app.ui.common.Avatar
+import talq.app.ui.common.StatusDisc
+import talq.app.ui.common.WAITING_FOR_SERVER
 import talq.core.repo.TalkSession
 import talq.core.shift.ApproveTarget
 
+/** [session] may be one that is not checked yet (TalqNavHost): the phone's own settings, and Log out, are there then. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -95,14 +103,20 @@ fun SettingsScreen(
     val appName = appName()
     val pushStatus by push.status.collectAsStateWithLifecycle()
     var confirmLogout by remember { mutableStateOf(false) }
-    var loggingOut by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val loggingOut by context.appContainer.loggingOut.collectAsStateWithLifecycle()
     var notificationsAllowed by remember { mutableStateOf(true) }
+    var directAlert by remember { mutableStateOf(AlertState.On) }
+    var otherAlert by remember { mutableStateOf(AlertState.On) }
+    // Picked below, a message sound makes both message alerts anew.
+    val messageSound by context.appContainer.sounds.message.collectAsStateWithLifecycle()
     var fullScreenCalls by remember { mutableStateOf(true) }
     val callsAvailable by produceState(false, session) { value = context.appContainer.calls.available(session) }
     // Re-read on every return to the screen: the user may just have been in system settings.
-    LifecycleResumeEffect(Unit) {
+    LifecycleResumeEffect(messageSound) {
         notificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        directAlert = TalqNotifications.alertState(context, NotificationKind.Direct)
+        otherAlert = TalqNotifications.alertState(context, NotificationKind.Other)
         fullScreenCalls = canShowCallsFullScreen(context)
         // An app such as ntfy may have been installed or removed meanwhile.
         push.refreshRoutes()
@@ -173,6 +187,8 @@ fun SettingsScreen(
             val (headline, detail, tone) =
                 if (blocked) {
                     Triple("Blocked on this phone", "Android is not letting $appName show notifications. Allow them in the system settings.", Tone.Bad)
+                } else if (!session.checked) {
+                    Triple(WAITING_FOR_SERVER, null, Tone.Neutral)
                 } else {
                     describe(pushStatus, appName)
                 }
@@ -185,8 +201,9 @@ fun SettingsScreen(
                     Tone.Bad -> colors.danger
                     Tone.Neutral -> colors.textSecondary
                 },
+                disc = true,
             )
-            Row(Modifier.padding(horizontal = 8.dp)) {
+            if (session.checked) Row(Modifier.padding(horizontal = 8.dp)) {
                 when (pushStatus) {
                     PushStatus.Active ->
                         TextButton(onClick = { openNotificationSettings(context) }) { Text("Notification settings") }
@@ -199,6 +216,12 @@ fun SettingsScreen(
                     PushStatus.Registering -> Unit
                 }
             }
+            // The two message alerts; their sound and importance are Android's settings.
+            fun openAlert(kind: NotificationKind) {
+                if (notificationsAllowed) openChannelSettings(context, TalqNotifications.channelId(context, kind)) else openNotificationSettings(context)
+            }
+            AlertRow("Direct messages and mentions", directAlert) { openAlert(NotificationKind.Direct) }
+            AlertRow("Other messages", otherAlert) { openAlert(NotificationKind.Other) }
             // Which route delivers push: Google Play services (built in) or an app such as ntfy.
             val pushRoutes by push.routes.collectAsStateWithLifecycle()
             val routes = pushRoutes.all
@@ -207,7 +230,7 @@ fun SettingsScreen(
             val inUse = routes.firstOrNull { it.packageName == currentRoute }
             if (inUse != null) {
                 SettingRow(title = "Delivered by", value = inUse.label)
-                if (routes.size > 1) {
+                if (routes.size > 1 && session.checked) {
                     Row(Modifier.padding(horizontal = 8.dp)) {
                         TextButton(onClick = { choosingRoute = true }) { Text("Change") }
                     }
@@ -270,6 +293,7 @@ fun SettingsScreen(
                     detail = if (fullScreenCalls) null else
                         "Calls ring as a notification only.",
                     valueColor = if (fullScreenCalls) colors.online else colors.danger,
+                    disc = true,
                 )
                 if (!fullScreenCalls) {
                     Row(Modifier.padding(horizontal = 8.dp)) {
@@ -278,9 +302,11 @@ fun SettingsScreen(
                 }
             }
 
-            Divider()
-            SectionLabel("Shift status")
-            ShiftSection(context.appContainer.shift)
+            if (session.checked) {
+                Divider()
+                SectionLabel("Shift status")
+                ShiftSection(context.appContainer.shift)
+            }
 
             Divider()
             SectionLabel("Diagnostics")
@@ -351,7 +377,6 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(onClick = {
                     confirmLogout = false
-                    loggingOut = true
                     onLogout()
                 }) { Text("Log out", color = colors.danger) }
             },
@@ -561,6 +586,19 @@ internal fun openNotificationSettings(context: Context) {
     }
 }
 
+/** One channel's page in the system notification settings (its sound, importance, off). Also the list's Fix. */
+internal fun openChannelSettings(context: Context, channelId: String) {
+    val intent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        .putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+        openNotificationSettings(context)
+    }
+}
+
 /** Whether an incoming call may take the whole screen (always before Android 14). */
 private fun canShowCallsFullScreen(context: Context): Boolean =
     Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
@@ -610,17 +648,64 @@ private fun Divider() {
     HorizontalDivider(color = TalqTheme.colors.divider)
 }
 
+/** [disc]: [value] is a state, so a disc in its colour is painted beside it. */
 @Composable
-private fun SettingRow(title: String, value: String, detail: String? = null, valueColor: Color = TalqTheme.colors.textSecondary) {
+private fun SettingRow(
+    title: String,
+    value: String,
+    detail: String? = null,
+    valueColor: Color = TalqTheme.colors.textSecondary,
+    disc: Boolean = false,
+) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
             Spacer(Modifier.width(12.dp))
+            if (disc) {
+                StatusDisc(valueColor)
+                Spacer(Modifier.width(8.dp))
+            }
             Text(value, style = MaterialTheme.typography.bodyMedium, color = valueColor)
         }
         if (detail != null) {
             Spacer(Modifier.height(2.dp))
             Text(detail, style = MaterialTheme.typography.bodySmall, color = TalqTheme.colors.textMuted)
         }
+    }
+}
+
+/** A message alert and how it stands on this phone; a tap opens Android's own page for it. */
+@Composable
+private fun AlertRow(title: String, state: AlertState, onClick: () -> Unit) {
+    val colors = TalqTheme.colors
+    Row(
+        Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(12.dp))
+        StatusDisc(
+            when (state) {
+                AlertState.On -> colors.online
+                AlertState.Silent -> colors.amber
+                AlertState.Off -> colors.danger
+            },
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            when (state) {
+                AlertState.On -> "On"
+                AlertState.Silent -> "Silent"
+                AlertState.Off -> "Off"
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.textSecondary,
+        )
     }
 }

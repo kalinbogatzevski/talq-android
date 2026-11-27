@@ -1,9 +1,7 @@
 package talq.app.data
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
-import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.datastore.core.DataStore
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
@@ -12,12 +10,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import java.security.KeyStore
 import java.security.UnrecoverableKeyException
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -95,19 +90,7 @@ class ErpStore(context: Context) {
     private fun baseKey(account: String) = stringPreferencesKey("keybase|$account")
     private fun nameKey(account: String) = stringPreferencesKey("name|$account")
 
-    private fun key(): SecretKey {
-        val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
-        generator.init(
-            KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build(),
-        )
-        return generator.generateKey()
-    }
+    private fun key() = keystoreKey(KEY_ALIAS)
 
     /** base64(iv) ":" base64(ciphertext + tag). The Keystore picks the IV. */
     private fun encrypt(plain: String): String {
@@ -143,7 +126,6 @@ class ErpStore(context: Context) {
     private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
 
     private companion object {
-        const val KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "talq.erp.v1"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val ADDRESS = "address|"

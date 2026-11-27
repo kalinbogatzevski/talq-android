@@ -16,12 +16,33 @@ object RoomType {
     const val NOTE_TO_SELF = 6
 }
 
+/** What the user is in a conversation (Talk's participant types). */
+object ParticipantType {
+    const val OWNER = 1
+    const val MODERATOR = 2
+    const val USER = 3
+    const val GUEST = 4
+
+    /** Somebody with an account who followed the link of a public conversation and was not added to it. */
+    const val USER_SELF_JOINED = 5
+    const val GUEST_MODERATOR = 6
+}
+
+/** Bits of [Room.permissions] (Talk's attendee permissions). */
+object RoomPermission {
+    const val LOBBY_IGNORE = 8
+    const val CHAT = 128
+}
+
 object NotificationLevel {
     const val DEFAULT = 0
     const val ALWAYS = 1
     const val MENTION = 2
     const val NEVER = 3
 }
+
+/** Conversation attribute "Classified" (constants.md), a bit of the room's `attributes`. */
+private const val ATTRIBUTE_CLASSIFIED = 4
 
 /** A conversation as listed by `GET /room` (Talk API v4). */
 data class Room(
@@ -68,9 +89,51 @@ data class Room(
     /** Seconds, UTC; 0 = the status message does not expire. */
     val statusClearAt: Long,
     val raw: JsonObject,
+    /** The server that hosts the conversation, and its token there; empty for one on our own server. */
+    val remoteServer: String = "",
+    val remoteToken: String = "",
+    /** 0 = no lobby, 1 = a lobby for everyone but moderators; [lobbyTimer] = when the server lifts it (seconds, UTC), 0 = never. */
+    val lobbyState: Int = 0,
+    val lobbyTimer: Long = 0L,
+    /** The server's word on leaving (not the last moderator, not an announcement); absent = yes, as TalQ for desktop reads it. */
+    val canLeave: Boolean = true,
+    /** The server's word on starting a call here; absent = yes. */
+    val canStartCall: Boolean = true,
+    /** The user is rung for calls here (a switch of its own beside [notificationLevel]); absent = yes. */
+    val notificationCalls: Boolean = true,
 ) {
+    /**
+     * The conversation lives on another server. Ours passes only some requests on to it; the rest
+     * answer 406 there (Talk's `checkFederationSupport`), so what is local only is not offered.
+     */
+    val isFederated: Boolean get() = remoteServer.isNotEmpty() || remoteToken.isNotEmpty()
+
+    /**
+     * The user marked it sensitive (`isSensitive`), or it is a classified one, which the server forces sensitive for
+     * everyone: nothing of what is said in it is shown or kept outside it.
+     */
+    val isSensitive: Boolean get() = raw.bool("isSensitive") || raw.int("attributes") and ATTRIBUTE_CLASSIFIED != 0
+
     val isOneToOne: Boolean get() = type == RoomType.ONE_TO_ONE
     val isReadOnly: Boolean get() = readOnly != 0
+
+    /** Owner or moderator (a guest with moderator rights is not one here: Talk's `hasModeratorPermissions(false)`). */
+    val isModerator: Boolean get() = participantType == ParticipantType.OWNER || participantType == ParticipantType.MODERATOR
+
+    /**
+     * The server takes the user's posts, edits and deletes in this conversation: the guards of those
+     * routes (Talk 25.0.7 `ChatController`, `InjectionMiddleware`). Not read-only (the changelog room
+     * always is); the chat permission, as desktop's `postBlock` (only where the server asks for it,
+     * `chat-permission`; [permissions] 0 = not sent, counts as allowed); and no lobby in the way
+     * (moderators, guest moderators and who may ignore the lobby pass; a past [lobbyTimer] lifts it).
+     */
+    fun takesPosts(capabilities: TalkCapabilities, nowSeconds: Long): Boolean {
+        if (isReadOnly || type == RoomType.CHANGELOG) return false
+        if (capabilities.has("chat-permission") && permissions != 0 && permissions and RoomPermission.CHAT == 0) return false
+        val inLobby = lobbyState != 0 && lobbyTimer !in 1..nowSeconds
+        return !inLobby || isModerator || participantType == ParticipantType.GUEST_MODERATOR ||
+            permissions and RoomPermission.LOBBY_IGNORE != 0
+    }
 
     /**
      * The other person's Nextcloud user id: a one-to-one room's `name` is exactly that.
@@ -115,6 +178,13 @@ data class Room(
             statusMessage = o.str("statusMessage"),
             statusClearAt = o.long("statusClearAt"),
             raw = o,
+            remoteServer = o.str("remoteServer"),
+            remoteToken = o.str("remoteToken"),
+            lobbyState = o.int("lobbyState"),
+            lobbyTimer = o.long("lobbyTimer"),
+            canLeave = o.bool("canLeaveConversation", true),
+            canStartCall = o.bool("canStartCall", true),
+            notificationCalls = o.bool("notificationCalls", true),
         )
     }
 }

@@ -1,9 +1,9 @@
 package talq.core.model
 
 /*
- * Editing and deleting the user's own chat messages: which messages may be offered, the text an edit
- * starts from, and why the server refused. Ported from TalQ for desktop: the Edit / Delete entries of
- * the message menu (`MainWindow.cpp`, own messages only, no Edit on a file), `beginEditingMessage` +
+ * Editing and deleting chat messages: which messages may be offered, the text an edit starts from, and
+ * why the server refused. Ported from TalQ for desktop: the Edit / Delete entries of the message menu
+ * (`MainWindow.cpp`, own messages only, no Edit on a file), `beginEditingMessage` +
  * `MessageListModel::rawBodyFor` (the edit starts from the server's raw text), `mentionsForEdit` in
  * `src/core/TaskListLogic.h` (the mentions go back as `@"<mention-id>"`) and the EditMessage /
  * DeleteMessage arms of `src/core/TalkRefusalPolicy.h`.
@@ -12,7 +12,12 @@ package talq.core.model
  * an edit within 24 hours of sending, any time in a note-to-self conversation where the server has
  * `edit-messages-note-to-self`; a delete within 6 hours unless it has `delete-messages-unlimited`.
  * Desktop offers both always and lets the server refuse; here they are only offered while the
- * server would still take them. The server checks again either way.
+ * server would still take them, and only where it takes posts at all ([Room.takesPosts]). The server
+ * checks again either way.
+ *
+ * Other people's messages: Talk lets the conversation's owner and moderators edit and delete them,
+ * except in a one-to-one conversation (`ChatController`, 403 `permission`). Delete is offered for them;
+ * Edit is not (desktop offers it for own messages only).
  */
 
 /** Seconds after sending that a message can still be edited (outside note-to-self). */
@@ -45,40 +50,49 @@ fun editableText(m: ChatMessage): String? {
     return out
 }
 
-/** A message the user wrote that the server still knows as an ordinary message. */
-private fun isOwnLiveMessage(m: ChatMessage, mine: Boolean): Boolean =
-    mine && m.id > 0 && !m.deleted && !m.isSystem && !m.isUpdateSignal
+/** A message the server still knows as an ordinary message. */
+private fun isLiveMessage(m: ChatMessage): Boolean = m.id > 0 && !m.deleted && !m.isSystem && !m.isUpdateSignal
+
+/** The user may delete other people's messages in [room]. Both people of a one-to-one are its owners: not there. */
+private fun moderatesMessages(room: Room): Boolean =
+    room.isModerator && room.type != RoomType.ONE_TO_ONE && room.type != RoomType.FORMER_ONE_TO_ONE
 
 /**
- * May "Edit" be offered for [m]? [mine]: the signed-in user wrote it. [roomType]: the room's
- * [RoomType]. [nowSeconds]: the phone's clock (the server's own check decides in the end).
+ * May "Edit" be offered for [m] of [room]? [mine]: the signed-in user wrote it. [nowSeconds]: the
+ * phone's clock (the server's own check decides in the end).
  */
 fun canEditMessage(
     m: ChatMessage,
     mine: Boolean,
     capabilities: TalkCapabilities,
-    roomType: Int,
-    readOnly: Boolean,
+    room: Room,
     nowSeconds: Long,
 ): Boolean {
-    if (!capabilities.has("edit-messages") || readOnly || !isOwnLiveMessage(m, mine)) return false
+    if (!capabilities.has("edit-messages") || !room.takesPosts(capabilities, nowSeconds)) return false
+    if (!mine || !isLiveMessage(m)) return false
     if (m.messageType != "comment" || editableText(m) == null) return false
-    val unlimited = roomType == RoomType.NOTE_TO_SELF && capabilities.has("edit-messages-note-to-self")
+    val unlimited = room.type == RoomType.NOTE_TO_SELF && capabilities.has("edit-messages-note-to-self")
     return unlimited || nowSeconds - m.timestamp < EDIT_WINDOW_SECONDS
 }
 
+/** Is "Delete" offered at all in [room] (the selection bar's button; each message has [canDeleteMessage])? */
+fun offersDelete(capabilities: TalkCapabilities, room: Room, nowSeconds: Long): Boolean =
+    capabilities.has("delete-messages") && room.takesPosts(capabilities, nowSeconds)
+
 /**
- * May "Delete" be offered for [m]? A file or any other shared object also needs
+ * May "Delete" be offered for [m] of [room]: an own message, or anybody's for the conversation's owner
+ * and moderators (not in a one-to-one). A file or any other shared object also needs
  * `rich-object-delete` ("delete chat messages which are file or rich object shares").
  */
 fun canDeleteMessage(
     m: ChatMessage,
     mine: Boolean,
     capabilities: TalkCapabilities,
-    readOnly: Boolean,
+    room: Room,
     nowSeconds: Long,
 ): Boolean {
-    if (!capabilities.has("delete-messages") || readOnly || !isOwnLiveMessage(m, mine)) return false
+    if (!offersDelete(capabilities, room, nowSeconds) || !isLiveMessage(m)) return false
+    if (!mine && !moderatesMessages(room)) return false
     val shared = m.file != null || carriesRichObject(m.message, nonMentionKeys(m))
     if (shared && !capabilities.has("rich-object-delete")) return false
     return capabilities.has("delete-messages-unlimited") || nowSeconds - m.timestamp < DELETE_WINDOW_SECONDS

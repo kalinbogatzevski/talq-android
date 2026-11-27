@@ -8,11 +8,16 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import talq.core.TalkError
 import talq.core.model.ChatMessage
+import talq.core.model.Room
+import talq.core.model.mentionsByName
 
-/** Unread messages of one bucket (a topic, or General = 0). */
-data class UnreadCount(val count: Int = 0, val mentioned: Boolean = false)
+/**
+ * Unread messages of one bucket (a topic, or General = 0). [mentioned]: the user or everyone is
+ * mentioned in one of them; [direct]: the user by name.
+ */
+data class UnreadCount(val count: Int = 0, val mentioned: Boolean = false, val direct: Boolean = false)
 
-internal data class UnreadEntry(val id: Long, val topicId: Long, val mention: Boolean)
+internal data class UnreadEntry(val id: Long, val topicId: Long, val mention: Boolean, val direct: Boolean)
 
 /**
  * What is unread in one room, split by topic. Key 0 is "General" (messages in no topic).
@@ -27,12 +32,14 @@ class UnreadState internal constructor(
     /** False when unread messages reach further back than was scanned: counts are a minimum. */
     val complete: Boolean = true,
     val loaded: Boolean = false,
+    /** Every message up to this one has been looked at (by a scan, or as it came in live after one). */
+    internal val knownTo: Long = 0L,
 ) {
     internal fun isLive(e: UnreadEntry): Boolean = e.id > maxOf(seenAll, seen[e.topicId] ?: 0L)
 
     /** Unread per bucket; buckets with nothing unread are absent. */
     val byTopic: Map<Long, UnreadCount> = entries.filter { isLive(it) }.groupBy { it.topicId }
-        .mapValues { (_, list) -> UnreadCount(list.size, list.any { it.mention }) }
+        .mapValues { (_, list) -> UnreadCount(list.size, list.any { it.mention }, list.any { it.direct }) }
 
     fun of(topicId: Long): UnreadCount = byTopic[topicId] ?: UnreadCount()
 
@@ -43,6 +50,20 @@ class UnreadState internal constructor(
      */
     fun pendingIn(topicIds: Set<Long>): Int = entries.count { it.topicId in topicIds }
 
+    /**
+     * The messages that [room], as the conversation list has it, counts as unread although they were looked
+     * at here: something unread before them in another topic holds the server's marker. Empty where what is
+     * known here is not what the server counts (a message was deleted, or not seen yet). When more came since,
+     * it still holds for the ones before.
+     */
+    internal fun readAhead(room: Room): List<Long> {
+        val newest = room.lastMessage?.id ?: 0L
+        if (!loaded || !complete || newest <= 0L) return emptyList()
+        val counted = entries.filter { it.id > room.lastReadMessage && it.id <= newest }
+        val fits = if (knownTo >= newest) counted.size == room.unreadMessages else counted.size < room.unreadMessages
+        return if (fits) counted.filterNot { isLive(it) }.map { it.id } else emptyList()
+    }
+
     /** Newest message id the user has looked at in this bucket during this session (0 = none). */
     fun seenUpTo(topicId: Long): Long = maxOf(seenAll, seen[topicId] ?: 0L)
 
@@ -52,7 +73,8 @@ class UnreadState internal constructor(
         seenAll: Long = this.seenAll,
         complete: Boolean = this.complete,
         loaded: Boolean = this.loaded,
-    ) = UnreadState(entries, seen, seenAll, complete, loaded)
+        knownTo: Long = this.knownTo,
+    ) = UnreadState(entries, seen, seenAll, complete, loaded, knownTo)
 }
 
 /**
@@ -76,15 +98,34 @@ class UnreadTracker internal constructor(
 
     val state: StateFlow<UnreadState> = _state.asStateFlow()
 
+    /** The read marker as it was listed last ([follow]). Changed under [scanMutex]. */
+    @kotlin.concurrent.Volatile
+    private var listed = Long.MIN_VALUE
+
+    init {
+        // The conversation list takes off what was looked at here (listedRoom).
+        session.launch { state.collect { if (session.unreadIfCreated(token) === this@UnreadTracker) session.noteUnread(token, it) } }
+        // Marked as unread on another device: what was looked at here is unread again.
+        session.launch {
+            session.rooms.rooms.collect {
+                val marker = session.rooms.room(token)?.lastReadMessage
+                if (marker == null || marker == listed) return@collect
+                // Found again among what is unread; only where something counts it (a room that was open).
+                if (marker < listed && _state.value.loaded) refresh() else scanMutex.withLock { session.rooms.room(token)?.let(::follow) }
+            }
+        }
+    }
+
     private fun marker(): Long = session.rooms.room(token)?.lastReadMessage ?: 0L
 
     private fun countable(m: ChatMessage): Boolean =
         !m.isUpdateSignal && !m.isSystem && !m.deleted && !session.isMe(m.actorType, m.actorId)
 
-    private fun entry(m: ChatMessage) = UnreadEntry(m.id, m.topicId, mentionsMe(m))
-
-    private fun mentionsMe(m: ChatMessage): Boolean = m.parameters.values.any {
-        it.key.startsWith("mention-") && (it.type == "call" || (it.type == "user" && it.id == session.user.userId))
+    /** The user by name (`user`) is a direct mention, `@all` (`call`) one of everyone, as the list's own flags. */
+    private fun entry(m: ChatMessage): UnreadEntry {
+        val direct = mentionsByName(m.parameters, session.user.userId)
+        val everyone = m.parameters.values.any { it.key.startsWith("mention-") && it.type == "call" }
+        return UnreadEntry(m.id, m.topicId, mention = direct || everyone, direct = direct)
     }
 
     /**
@@ -93,6 +134,31 @@ class UnreadTracker internal constructor(
      */
     private var floor = 0L
     private var top = 0L
+
+    /** The newest message that came in live before anything was scanned: it was not taken in. */
+    @kotlin.concurrent.Volatile
+    private var missed = 0L
+
+    /**
+     * [room] as it is listed now. When its read marker went back ("Mark as unread", on any device) nothing past it counts
+     * as looked at any more, and what was scanned down to the old one does not reach it. A marker that reading ahead in
+     * another topic holds back never goes back; what is listed for a conversation on another server is not checked.
+     * Under [scanMutex].
+     */
+    private fun follow(room: Room) {
+        val marker = room.lastReadMessage
+        if (marker < listed && !room.isFederated) {
+            floor = 0L
+            top = 0L
+            _state.update { s ->
+                s.copy(seenAll = minOf(s.seenAll, marker), seen = s.seen.mapValues { minOf(it.value, marker) }, complete = false, knownTo = 0L)
+            }
+        }
+        listed = marker
+    }
+
+    /** The scan has reached the read marker: below 1 (the server's -2) that is before the first message. Under [scanMutex]. */
+    private fun reached(marker: Long): Boolean = floor <= maxOf(marker, 1L)
 
     private class Scan(val found: List<UnreadEntry>, val newest: Long, val cursor: Long, val beginning: Boolean)
 
@@ -121,17 +187,21 @@ class UnreadTracker internal constructor(
         return Scan(found, newest, cursor, beginning = false)
     }
 
-    /** Scan for unread messages. Returns false when the server could not be asked. */
-    suspend fun refresh(): Boolean = scanMutex.withLock {
+    /**
+     * Scan for unread messages. Returns false when the server could not be asked. [force]: also when the
+     * conversation list, which may be behind, knows of nothing newer than the read marker.
+     */
+    suspend fun refresh(force: Boolean = false): Boolean = scanMutex.withLock {
         // The rooms list has not answered yet: the read marker is unknown, so nothing can be
         // said about what is unread. Not "nothing is unread".
         val room = session.rooms.room(token) ?: return false
         val marker = room.lastReadMessage
+        follow(room)
         // Nothing newer than the marker: no request needed.
-        if ((room.lastMessage?.id ?: 0L) <= marker && room.unreadMessages == 0) {
+        if (!force && (room.lastMessage?.id ?: 0L) <= marker && room.unreadMessages == 0) {
             floor = 1L
             top = maxOf(top, marker)
-            _state.update { it.copy(entries = it.entries.filter { e -> e.id > marker }, complete = true, loaded = true) }
+            _state.update { it.copy(entries = it.entries.filter { e -> e.id > marker }, complete = true, loaded = true, knownTo = top) }
             return true
         }
         try {
@@ -143,13 +213,14 @@ class UnreadTracker internal constructor(
             top = maxOf(r.newest, if (stitched) top else 0L)
             // With no marker at all (0) everything would count as unread; treat as nothing known.
             val scanned = if (marker == 0L) emptyList() else r.found
-            val complete = marker == 0L || floor <= marker
+            val complete = marker == 0L || reached(marker)
             _state.update { s ->
                 val kept = s.entries.filter { it.id > marker && (it.id > r.newest || (stitched && it.id < r.cursor)) }
                 s.copy(
                     entries = (scanned + kept).distinctBy { it.id }.sortedBy { it.id },
                     complete = complete,
                     loaded = true,
+                    knownTo = top,
                 )
             }
             true
@@ -160,15 +231,16 @@ class UnreadTracker internal constructor(
 
     /**
      * The last scan stopped before it reached the read marker: read further back from where it
-     * stopped. Called each time the user finishes reading a bucket, so even a long backlog is
-     * known completely after a few of those, and the server's marker can move.
+     * stopped. Called each time the user finishes reading a bucket, and again and again once nothing
+     * unread is known any more (see [markSeenLocked]), so even a long backlog becomes known completely
+     * and the server's marker can move. False when that got nowhere.
      */
-    private suspend fun extend() = scanMutex.withLock {
+    private suspend fun extend(): Boolean = scanMutex.withLock {
         val marker = marker()
-        if (floor <= 0L) return@withLock
-        if (floor <= marker) {
+        if (floor <= 0L) return@withLock false
+        if (reached(marker)) {
             _state.update { it.copy(complete = true) }
-            return@withLock
+            return@withLock true
         }
         try {
             val r = scan(floor, marker, 0L)
@@ -176,25 +248,90 @@ class UnreadTracker internal constructor(
             _state.update { s ->
                 s.copy(
                     entries = (s.entries + r.found).distinctBy { it.id }.sortedBy { it.id },
-                    complete = floor <= marker,
+                    complete = reached(marker),
                 )
             }
+            true
         } catch (e: TalkError) {
             // Still incomplete; the next read tries again.
+            false
         }
     }
 
-    /** New messages from the room's live feed. */
-    internal fun onLiveMessages(batch: List<ChatMessage>) {
-        if (!_state.value.loaded) return
-        val marker = marker()
+    /**
+     * New messages from the room's live feed, which brings everything after message [from] (where it began).
+     * Without it: messages from elsewhere, so nothing is known of what lies before them.
+     */
+    internal fun onLiveMessages(batch: List<ChatMessage>, from: Long = Long.MAX_VALUE) {
+        val newest = batch.maxOfOrNull { it.id } ?: return
+        if (!_state.value.loaded) {
+            missed = maxOf(missed, newest)
+            return
+        }
+        // The chat's history was deleted: nothing from before it is unread any more.
+        val cleared = batch.lastOrNull { it.systemMessage == "history_cleared" }?.id ?: 0L
+        val marker = maxOf(marker(), cleared)
         val fresh = batch.filter { it.id > marker && countable(it) }.map { entry(it) }
-        if (fresh.isEmpty()) return
-        _state.update { s ->
-            val known = s.entries.mapTo(HashSet()) { it.id }
-            s.copy(entries = (s.entries + fresh.filterNot { it.id in known }).sortedBy { it.id })
+        if (fresh.isNotEmpty() || cleared > 0L) _state.update { s ->
+            val held = s.entries.filter { it.id > cleared }
+            val known = held.mapTo(HashSet()) { it.id }
+            s.copy(entries = (held + fresh.filterNot { it.id in known }).sortedBy { it.id })
+        }
+        // It follows on what was scanned: no other scan needed for these. One that runs now sees to it itself.
+        if (!scanMutex.tryLock()) return
+        try {
+            if (newest > top && top >= maxOf(from, missed)) {
+                top = newest
+                _state.update { it.copy(knownTo = newest) }
+            }
+        } finally {
+            scanMutex.unlock()
         }
     }
+
+    /**
+     * "Mark as read" of the whole conversation, from its row in the list: up to its last entry as the list
+     * shows it, whatever sits in between. A conversation on another server is asked for "everything" where
+     * that is known (`chat-read-last`): the ids listed for it are not checked. Throws the server's refusal.
+     * The list is reloaded first: the server writes an older marker too, and another device may have read on.
+     */
+    internal suspend fun markRoomRead(): Unit = markMutex.withLock {
+        // What the user saw: a message that came since stays unread.
+        val last = (session.rooms.room(token) ?: return).lastMessage?.id ?: 0L
+        if (!session.rooms.refresh()) session.rooms.state.value.error?.let { throw it }
+        val room = session.rooms.room(token) ?: return
+        // Never back: the marker may be further on (read elsewhere, or the last message was deleted).
+        val target = maxOf(last, room.lastReadMessage)
+        val everything = session.capabilities.readLast && (last <= 0L || room.isFederated)
+        if (target <= 0L && !everything) return
+        val answer = client.markRead(token, if (everything) null else target)
+        val marker = answer?.lastReadMessage ?: target
+        remember(ChatScope.All, marker)
+        _state.update { it.copy(entries = it.entries.filter { e -> e.id > marker }) }
+        showMarker(answer, marker, last)
+    }
+
+    /**
+     * "Mark as unread" of the conversation, from its row in the list (see [talq.core.TalkClient.markUnread]).
+     * What this session remembers of having been looked at goes back with the marker, so the message shows as
+     * unread in its topic too. A chat that is open stays unread until something new is seen in it or it is
+     * opened again. Throws the server's refusal.
+     */
+    internal suspend fun markRoomUnread(): Unit = markMutex.withLock {
+        val last = session.rooms.room(token)?.lastMessage?.id ?: 0L
+        val answer = client.markUnread(token)
+        if (answer != null) showMarker(answer, answer.lastReadMessage, last) else session.rooms.refresh()
+        val back = answer?.lastReadMessage ?: marker()
+        // At once; what is unread is found again because the list says so too (see init).
+        _state.update { s -> s.copy(seenAll = minOf(s.seenAll, back), seen = s.seen.mapValues { minOf(it.value, back) }) }
+    }
+
+    /** The row at once: the server's own numbers when it sent them ([answer]), else nothing unread; true up to [last]. */
+    private fun showMarker(answer: Room?, marker: Long, last: Long) = session.rooms.applyMarker(
+        token, marker,
+        answer?.let { ReadLeft(it.unreadMessages, it.unreadMention, it.unreadMentionDirect) } ?: ReadLeft(0, mention = false, direct = false),
+        exactUpTo = maxOf(last, answer?.lastMessage?.id ?: 0L),
+    )
 
     /**
      * The user has looked at everything in [scope] up to message [upTo] (a message of this
@@ -205,33 +342,46 @@ class UnreadTracker internal constructor(
      * also halfway through a backlog). One call at a time per room, every tab of it included: the
      * server writes the marker it is sent, also an older one, so two requests that overtake each
      * other could move it back.
+     *
+     * Returns false when the server could not be asked or told: then only this session knows.
      */
-    suspend fun markSeen(scope: ChatScope, upTo: Long) = markMutex.withLock { markSeenLocked(scope, upTo) }
+    suspend fun markSeen(scope: ChatScope, upTo: Long): Boolean {
+        if (upTo <= 0) return true
+        // At once: another tab's call may be reading the backlog.
+        remember(scope, upTo)
+        return markMutex.withLock { markSeenLocked(scope, upTo) }
+    }
 
     private val markMutex = Mutex()
 
-    private suspend fun markSeenLocked(scope: ChatScope, upTo: Long) {
-        if (upTo <= 0) return
-        if (session.rooms.room(token) == null) {
-            // The read marker is unknown (the rooms list has not loaded): moving it now could
-            // skip unread messages in other topics. Remember locally only.
-            remember(scope, upTo)
-            return
-        }
-        if (!_state.value.loaded && !refresh() && scope != ChatScope.All) {
-            // Other topics' unread are unknown: remember locally, leave the server marker alone.
-            remember(scope, upTo)
-            return
-        }
-        remember(scope, upTo)
+    private suspend fun markSeenLocked(scope: ChatScope, upTo: Long): Boolean {
+        // The read marker is unknown (the rooms list has not loaded): moving it now could
+        // skip unread messages in other topics. Remembered locally only.
+        if (session.rooms.room(token) == null) return false
+        // Other topics' unread are unknown: remembered locally, the server marker left alone.
+        if (!_state.value.loaded && !refresh() && scope != ChatScope.All) return false
         if (!_state.value.complete) extend()
-        // The rooms list knows a newer entry than any scan has seen: look at it before deciding
-        // what may be marked read (it may be a message nobody has seen yet).
+        // Everything found so far is read and the scan has still not reached the marker: read on until
+        // something unread turns up (its tab shows it) or the marker is reached. A room with topics has no
+        // view of the whole chat that could pass it in one go: without this it kept its unread number.
+        var rounds = MAX_EXTENDS
+        while (scope != ChatScope.All && rounds-- > 0 && nothingFoundBeforeTheMarker()) {
+            if (!extend()) break
+        }
+        // The rooms list, or the tab itself (a page loaded before the list answered), knows a newer entry than
+        // any scan has seen: look at it before deciding what may be marked read (there may be a message before
+        // it, in another topic, that nobody has seen yet).
         val last = session.rooms.room(token)?.lastMessage
-        if (last != null && last.id > scanMutex.withLock { top }) refresh()
-        val s = _state.value
+        val scanned = scanMutex.withLock { top }
+        // Not for a text sent here a moment ago: the server has moved its marker to it by itself, and the live
+        // feed brings what came before it.
+        val sentHere = session.textOutboxIfCreated(token)?.sent?.value?.containsValue(upTo) == true
+        val ahead = scope != ChatScope.All && upTo > scanned && !sentHere
+        val looked = if (ahead || (last != null && last.id > scanned)) refresh(force = ahead) else true
+        // Could not be looked at: as a scan that did not reach the marker.
+        val s = _state.value.let { if (looked) it else it.copy(complete = false) }
         // Unread messages older than what was scanned may sit in another topic: don't skip them.
-        if (!s.complete && scope != ChatScope.All) return
+        if (!s.complete && scope != ChatScope.All) return looked
         val firstLive = s.entries.firstOrNull { s.isLive(it) }?.id ?: Long.MAX_VALUE
         // Only ids known to be messages of this room are sent as the marker.
         var target = if (upTo < firstLive) upTo else 0L
@@ -245,8 +395,8 @@ class UnreadTracker internal constructor(
         ) {
             target = last.id
         }
-        if (target <= marker()) return
-        try {
+        if (target <= marker()) return true
+        return try {
             val answer = client.markRead(token, target)
             // The server's unread numbers after the move (only with federation-v1, and only when the
             // answer is about this marker), so a room read halfway shows what is left at once.
@@ -254,8 +404,10 @@ class UnreadTracker internal constructor(
                 ?.let { ReadLeft(it.unreadMessages, it.unreadMention, it.unreadMentionDirect) }
             session.rooms.applyRead(token, target, left)
             _state.update { it.copy(entries = it.entries.filter { e -> e.id > target }) }
+            true
         } catch (e: TalkError) {
             // Stays unread on the server; the local memory still hides it for this session.
+            false
         }
     }
 
@@ -270,6 +422,8 @@ class UnreadTracker internal constructor(
         markSeen(scope, newest)
     }
 
+    private fun nothingFoundBeforeTheMarker(): Boolean = _state.value.let { s -> !s.complete && s.entries.none { s.isLive(it) } }
+
     private fun remember(scope: ChatScope, upTo: Long) {
         _state.update { s ->
             when (scope) {
@@ -283,5 +437,8 @@ class UnreadTracker internal constructor(
     private companion object {
         const val PAGE_SIZE = 100
         const val MAX_PAGES = 3
+
+        /** Scans further back in one go: 3000 messages. The next read goes on from there. */
+        const val MAX_EXTENDS = 10
     }
 }

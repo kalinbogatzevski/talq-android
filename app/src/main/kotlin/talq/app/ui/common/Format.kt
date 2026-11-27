@@ -46,6 +46,16 @@ fun relativeTime(context: Context, timestamp: Long, nowMillis: Long = System.cur
 /** "Maria Petrova" -> "Maria". */
 fun firstName(displayName: String): String = displayName.trim().substringBefore(' ')
 
+/**
+ * What is underneath a request that failed: the exceptions and the library's own words, for Diagnostics and the
+ * start screen. No address's query, and no more than a line or two.
+ */
+fun TalkError.technical(): String =
+    generateSequence(cause) { c -> c.cause?.takeIf { it !== c } }.take(4).joinToString(" < ") { c ->
+        val words = c.message.orEmpty().substringBefore('?').take(90)
+        (c::class.simpleName ?: "?") + if (words.isBlank()) "" else ": $words"
+    }.ifEmpty { this::class.simpleName.orEmpty() }
+
 /** A sentence for a person, not a status code. */
 fun TalkError.userMessage(): String = when (this) {
     is TalkError.Network -> "Can't reach the server. Check your connection."

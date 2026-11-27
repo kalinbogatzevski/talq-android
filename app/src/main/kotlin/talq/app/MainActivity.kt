@@ -2,6 +2,10 @@ package talq.app
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.SystemClock
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewTreeObserver
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -13,11 +17,41 @@ import talq.app.theme.ThemedSystemBars
 import talq.app.theme.TalqTheme
 
 class MainActivity : ComponentActivity() {
+    /**
+     * What an Esc does that nothing on screen took, while it must not become Back (a conversation is
+     * open beside the list, see TalqNavHost). Null: Android makes Back of it, as ever.
+     */
+    var onEscape: (() -> Unit)? = null
+    private var escapeTaken = false
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_ESCAPE) {
+            // Held down: the first press decided.
+            if (escapeTaken && event.repeatCount > 0) return true
+            val escape = onEscape
+            if (escape != null && event.hasNoModifiers()) {
+                escapeTaken = true
+                if (event.repeatCount == 0) escape()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_ESCAPE && escapeTaken) {
+            escapeTaken = false
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // Only a fresh start carries a new deep link; a rotation would replay the old one.
         if (savedInstanceState == null) handleDeepLink(intent)
+        appContainer.showSaved()
         setContent {
             val theme by appContainer.appearance.theme.collectAsStateWithLifecycle()
             TalqTheme(theme) {
@@ -25,6 +59,25 @@ class MainActivity : ComponentActivity() {
                 TalqRoot(appContainer)
             }
         }
+        holdFirstFrame()
+    }
+
+    /**
+     * The first frame is the list, not a screen that gives way to it: it waits for what the phone itself keeps
+     * (the account, the saved list, its order), which is read while the screen is made, so there is hardly
+     * anything left to wait for. Never for the network, and never long; Android's start picture stays meanwhile.
+     */
+    private fun holdFirstFrame() {
+        if (appContainer.startKnown) return
+        val content = findViewById<View>(android.R.id.content)
+        val from = SystemClock.uptimeMillis()
+        content.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (!appContainer.startKnown && SystemClock.uptimeMillis() - from < FIRST_FRAME_MILLIS) return false
+                content.viewTreeObserver.removeOnPreDrawListener(this)
+                return true
+            }
+        })
     }
 
     override fun onStart() {
@@ -46,5 +99,9 @@ class MainActivity : ComponentActivity() {
         // Reopened from the recents list: the intent is the old one, don't jump again.
         if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
         DeepLink.fromIntent(this, intent)?.let { appContainer.pendingDeepLink.value = it }
+    }
+
+    private companion object {
+        const val FIRST_FRAME_MILLIS = 300L
     }
 }

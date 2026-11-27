@@ -12,6 +12,7 @@ import talq.core.net.asObject
 import talq.core.net.asText
 import talq.core.net.bool
 import talq.core.net.int
+import talq.core.net.jsonDeeperThan
 import talq.core.net.obj
 import talq.core.net.str
 import talq.core.net.strings
@@ -47,8 +48,8 @@ data class HpbUser(
     val displayName: String = "",
 )
 
-/** One session that joined the room: its HPB session, user id and Nextcloud room session. */
-data class RoomJoinEntry(val sessionId: String, val userId: String, val ncSessionId: String)
+/** One session that joined the room: its HPB session, user id, Nextcloud room session and the person's name. */
+data class RoomJoinEntry(val sessionId: String, val userId: String, val ncSessionId: String, val displayName: String = "")
 
 /** What the signaling server sends. Anything not listed here arrives as [Other]. */
 sealed interface HpbInbound {
@@ -82,6 +83,7 @@ sealed interface HpbInbound {
         val sid: String,
         val roomType: String,
         val payload: JsonObject,
+        val senderUserId: String = "",
     ) : HpbInbound
 
     /** A moderator muted [peerId]'s microphone. */
@@ -96,13 +98,22 @@ sealed interface HpbInbound {
     data class Other(val type: String) : HpbInbound
 }
 
-/** Reads one text frame. Never throws: what cannot be read is [HpbInbound.Other]. */
-fun parseHpb(text: String): HpbInbound {
-    val o = try {
+/** Deeper than any message is nested (a handful of levels). */
+private const val MAX_DEPTH = 64
+
+/** The object in [text], which anybody in the room may have written; null when it holds none or is nested too deep. */
+private fun objectIn(text: String): JsonObject? {
+    if (jsonDeeperThan(text, MAX_DEPTH)) return null
+    return try {
         TalkJson.parseToJsonElement(text).asObject()
     } catch (e: Exception) {
         null
-    } ?: return HpbInbound.Other("invalid")
+    }
+}
+
+/** Reads one text frame. Never throws: what cannot be read is [HpbInbound.Other]. */
+fun parseHpb(text: String): HpbInbound {
+    val o = objectIn(text) ?: return HpbInbound.Other("invalid")
     val id = o["id"].asText()
     return when (val type = o.str("type")) {
         "welcome" -> HpbInbound.Welcome(o.obj("welcome")?.strings("features")?.toSet() ?: emptySet())
@@ -144,7 +155,7 @@ private fun event(e: JsonObject?): HpbInbound {
         )
         target == "room" && type == "join" -> HpbInbound.RoomJoined(
             e.arr("join").mapNotNull { it.asObject() }.map { j ->
-                RoomJoinEntry(j.str("sessionid"), j.str("userid"), j.str("roomsessionid"))
+                RoomJoinEntry(j.str("sessionid"), j.str("userid"), j.str("roomsessionid"), j.obj("user")?.str("displayname") ?: "")
             },
         )
         target == "room" && type == "leave" -> HpbInbound.RoomLeft(e.strings("leave"))
@@ -172,17 +183,12 @@ private fun message(m: JsonObject?): HpbInbound {
         sid = data.str("sid"),
         roomType = data.str("roomType").ifEmpty { "video" },
         payload = data.obj("payload") ?: EmptyJsonObject,
+        senderUserId = m.obj("sender")?.str("userid") ?: "",
     )
 }
 
 /** `data` is an object; some senders put it in as JSON text instead. */
-private fun dataObject(e: JsonElement?): JsonObject? = e.asObject() ?: e.asText()?.let {
-    try {
-        TalkJson.parseToJsonElement(it).asObject()
-    } catch (ex: Exception) {
-        null
-    }
-}
+private fun dataObject(e: JsonElement?): JsonObject? = e.asObject() ?: e.asText()?.let { objectIn(it) }
 
 /** Hello with the v1.0 ticket from `signaling/settings`. [backendUrl] is the Talk backend endpoint. */
 fun helloV1(backendUrl: String, userId: String, ticket: String): String = buildJsonObject {

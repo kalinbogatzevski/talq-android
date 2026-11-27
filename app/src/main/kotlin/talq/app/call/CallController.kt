@@ -260,9 +260,13 @@ class CallController(context: Context, private val container: AppContainer) {
         // finish leaving first (what it has not sent by then it leaves out, see supersede()).
         previous[r.token]?.let { old -> withTimeoutOrNull(PREVIOUS_WAIT_MS) { old.session.awaitClosed() } }
         if (startCancelled) return StartResult.Cancelled
+        // The open conversation's "typing…" session says goodbye before the call enters one (a second at most),
+        // while the media is set up. A start that comes to nothing leaves it to end by itself.
+        val goodbye = scope.launch { container.typing.leaveForCall() }
         var built: WebRtcEngine? = null
         try {
             withContext(NonCancellable + Dispatchers.Default) { built = WebRtcEngine(appContext, WebRtcEngine.egl(), r.video) }
+            goodbye.join()
         } catch (e: CancellationException) {
             built?.let { engine -> withContext(NonCancellable + Dispatchers.Default) { engine.close() } }
             throw e

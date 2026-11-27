@@ -267,6 +267,10 @@ object FolderCheck {
         big = addToRollup(big, Int.MAX_VALUE, false, false)
         big = addToRollup(big, 5, false, false)
         check("the sum saturates at Int.MAX_VALUE instead of wrapping negative", big.unread == Int.MAX_VALUE && big.count == 3)
+        var grey = addToRollup(FolderRollup(), 2, false, false, muted = 5)
+        grey = addToRollup(grey, 0, false, false, muted = -3)
+        check("muted messages are a sum of their own (a negative one adds nothing)", grey.unread == 2 && grey.muted == 5)
+        check("only muted unread: no coloured badge", !rollupShowsBadge(addToRollup(FolderRollup(), 0, false, false, muted = 4)))
     }
 
     private fun testNames() {
@@ -1438,6 +1442,13 @@ object FolderCheck {
             roomFolderMember(muted, countMuted = false) == FolderMember("chat0001", 0, false, false))
         check("a muted room adds its number when they are counted", roomFolderMember(muted, countMuted = true).unread == 5)
         check("a room that is not muted adds its number and its mention", roomFolderMember(loud, countMuted = false) == FolderMember("chat0002", 3, true, false))
+        check("a muted room's number is handed on apart",
+            roomFolderMember(muted, countMuted = false, mutedPart = 5) == FolderMember("chat0001", 0, false, false, 5))
+        check("... and not when muted rooms are counted", roomFolderMember(muted, countMuted = true, mutedPart = 5) == FolderMember("chat0001", 5, true, false))
+        check("what sits in muted topics leaves the room's number",
+            roomFolderMember(loud, countMuted = false, mutedPart = 2) == FolderMember("chat0002", 1, true, false, 2))
+        check("... and the mention with the last message that was not muted",
+            roomFolderMember(loud, countMuted = false, mutedPart = 3) == FolderMember("chat0002", 0, false, false, 3))
     }
 
     private fun addFolderTo(s: FolderState, name: String): FolderState = createFolder(s, name, 0x77, en).state

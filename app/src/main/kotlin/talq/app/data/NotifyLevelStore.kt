@@ -12,6 +12,8 @@ import talq.core.model.NotificationLevel
  * The notification levels the user chose, kept on the phone so a push can be judged before
  * (or without) asking the server: one entry per conversation and per topic whose level is
  * NOT "default". Key: `server|user|token|topicId`, topic id 0 = the conversation itself.
+ * Beside them, for the same reason, which conversations are one-to-one ([person]) and which are marked sensitive
+ * ([sensitive]).
  *
  * A small preferences file, read whole on first use: the push handler needs an answer at
  * once, in a process that may have been started a moment ago. Safe from any thread.
@@ -79,6 +81,48 @@ class NotifyLevelStore(context: Context) {
         write(levels.filterKeys { it.isNotEmpty() }.mapKeys { key(account, it.key, 0L) })
     }
 
+    /**
+     * The one-to-one conversation [token] as the last conversation list had it: the hash of the other person's
+     * name (never the name itself), or null when it is not one, or not known.
+     */
+    fun person(account: String, token: String): Int? = synchronized(lock) { map()[personKey(account, token)] }
+
+    /** The one-to-one conversations of a fresh conversation list (token -> the other person's name). */
+    fun putPeople(account: String, names: Map<String, String>) {
+        if (account.isEmpty()) return
+        val fresh = names.entries.filter { it.key.isNotEmpty() }.associate { personKey(account, it.key) to it.value.hashCode() }
+        synchronized(lock) {
+            val m = map()
+            val gone = m.keys.filter { it.startsWith(personKey(account, "")) && it !in fresh }
+            val changed = fresh.filter { (k, v) -> m[k] != v }
+            if (gone.isEmpty() && changed.isEmpty()) return
+            val editor = prefs.edit()
+            gone.forEach { m.remove(it); editor.remove(it) }
+            changed.forEach { (k, v) -> m[k] = v; editor.putInt(k, v) }
+            editor.apply()
+        }
+    }
+
+    /** Whether [token] is marked sensitive as the last conversation list had it; null when it is not known. */
+    fun sensitive(account: String, token: String): Boolean? =
+        synchronized(lock) { map()[sensitiveKey(account, token)] }?.let { it != 0 }
+
+    /** Which conversations of a fresh conversation list are marked sensitive (token -> marked). */
+    fun putSensitive(account: String, marked: Map<String, Boolean>) {
+        if (account.isEmpty()) return
+        val fresh = marked.filterKeys { it.isNotEmpty() }.entries.associate { sensitiveKey(account, it.key) to if (it.value) 1 else 0 }
+        synchronized(lock) {
+            val m = map()
+            val gone = m.keys.filter { it.startsWith(sensitiveKey(account, "")) && it !in fresh }
+            val changed = fresh.filter { (k, v) -> m[k] != v }
+            if (gone.isEmpty() && changed.isEmpty()) return
+            val editor = prefs.edit()
+            gone.forEach { m.remove(it); editor.remove(it) }
+            changed.forEach { (k, v) -> m[k] = v; editor.putInt(k, v) }
+            editor.apply()
+        }
+    }
+
     private fun write(entries: Map<String, Int>) {
         var changed = false
         synchronized(lock) {
@@ -111,6 +155,10 @@ class NotifyLevelStore(context: Context) {
     }
 
     private fun key(account: String, token: String, topicId: Long) = "$account|$token|$topicId"
+
+    private fun personKey(account: String, token: String) = "@person|$account|$token"
+
+    private fun sensitiveKey(account: String, token: String) = "@sensitive|$account|$token"
 
     private companion object {
         const val KEY_ACCOUNT = "@account"

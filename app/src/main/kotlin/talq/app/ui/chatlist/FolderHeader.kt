@@ -50,7 +50,8 @@ internal const val OTHER_SECTION_NAME = "Other"
  * (shown in capitals; the stored name keeps its case) and, whenever something in it is unread, open
  * or closed, the sum of its unread counts; nothing when there is nothing to read. That badge takes
  * the rows' colours ([unreadFill]: danger for a direct mention, amber for another mention, the
- * accent otherwise), with an "@" beside it for a mention (the colour is not the only sign).
+ * accent otherwise), with an "@" beside it for a mention (the colour is not the only sign). What was
+ * muted (muted chats, muted topics) is a grey sum of its own to its right, alone when that is all.
  * Decided difference (the owner's choice): desktop shows the number of chats in the folder, and
  * the unread sum only while it is closed; here there is no chat count (it read like unread).
  *
@@ -122,19 +123,25 @@ fun FolderHeader(
             // Read as typed: a screen reader may spell out a word in capitals.
             modifier = Modifier.weight(1f).semantics { contentDescription = name },
         )
-        if (showBadge) {
-            val words = unreadWords(rollup.unread, rollup.mention, rollup.directMention)
+        if (showBadge || rollup.muted > 0) {
+            val words = unreadWords(rollup.unread, rollup.mention, rollup.directMention, muted = rollup.muted)
             Spacer(Modifier.width(2.dp))
             Row(
                 modifier = Modifier.clearAndSetSemantics { contentDescription = words },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (rollup.mention) {
+                if (showBadge) {
+                    if (rollup.mention) {
+                        Spacer(Modifier.width(6.dp))
+                        Badge("@", muted = false, fill = fill)
+                    }
                     Spacer(Modifier.width(6.dp))
-                    Badge("@", muted = false, mutedFill = fill, fill = fill)
+                    Badge(countText(rollup.unread), muted = false, fill = fill)
                 }
-                Spacer(Modifier.width(6.dp))
-                Badge(if (rollup.unread > 999) "999+" else rollup.unread.toString(), muted = false, mutedFill = fill, fill = fill)
+                if (rollup.muted > 0) {
+                    Spacer(Modifier.width(6.dp))
+                    Badge(countText(rollup.muted), muted = true)
+                }
             }
         }
     }

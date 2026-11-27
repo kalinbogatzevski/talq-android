@@ -17,6 +17,7 @@ import talq.app.appContainer
 import talq.app.R
 import talq.app.nav.DeepLink
 import talq.app.push.NotificationKind
+import talq.app.push.TalqNotifications
 
 /**
  * The notifications of calls: the ringing one (CallStyle, full screen over the lock screen, the
@@ -60,7 +61,7 @@ object CallNotifications {
                 .build(),
         )
         manager.createNotificationChannel(
-            NotificationChannelCompat.Builder(NotificationKind.Call.channelId, NotificationManagerCompat.IMPORTANCE_HIGH)
+            NotificationChannelCompat.Builder(TalqNotifications.channelId(context, NotificationKind.Call), NotificationManagerCompat.IMPORTANCE_HIGH)
                 .setName("Missed calls")
                 .setDescription("Calls you did not answer, and calls that came while you were in another call")
                 .setShowBadge(true)
@@ -162,7 +163,7 @@ object CallNotifications {
             context, requestCode(nid, 4), CallActivity.outgoingIntent(context, token, video = false),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val b = NotificationCompat.Builder(context, NotificationKind.Call.channelId)
+        val b = NotificationCompat.Builder(context, TalqNotifications.channelId(context, NotificationKind.Call))
             .setSmallIcon(R.drawable.ic_stat_talq)
             .setColor(ACCENT)
             .setContentTitle(callerName)
@@ -195,7 +196,7 @@ object CallNotifications {
             context, requestCode(nid, 3), DeepLink(token, null, null).toIntent(context),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val n = NotificationCompat.Builder(context, NotificationKind.Call.channelId)
+        val n = NotificationCompat.Builder(context, TalqNotifications.channelId(context, NotificationKind.Call))
             .setSmallIcon(R.drawable.ic_stat_talq)
             .setColor(ACCENT)
             .setContentTitle(roomName.ifBlank { "A conversation" })

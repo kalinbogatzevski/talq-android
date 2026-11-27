@@ -40,7 +40,8 @@ import talq.app.theme.TalqTheme
 // Searching the conversation list, as TalQ for desktop's search row does (MainWindow.cpp
 // `m_searchField`; SidebarPainter.cpp `setFilterText`, `rebuildLayouts`, `buildFolderRows`):
 //  - a filter over the conversations the app already holds, as you type; nothing is asked of the
-//    server. It matches the conversation's name only (never the last message or a folder name);
+//    server. It matches the conversation's name only (never the last message or a folder name), and
+//    looks inside what "Show" shows (ListFilter.kt), whose chip stays up meanwhile;
 //  - folders stay, every folder is shown open and a folder without a match is left out
 //    (`buildRoomSections(searching = true)`); a folder header tap does nothing meanwhile, so no
 //    hidden collapsed state changes;

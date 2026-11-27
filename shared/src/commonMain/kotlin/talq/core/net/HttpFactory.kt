@@ -5,8 +5,11 @@ import io.ktor.client.HttpClientConfig
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.UserAgent
 import io.ktor.client.plugins.cookies.AcceptAllCookiesStorage
+import io.ktor.client.plugins.cookies.CookiesStorage
 import io.ktor.client.plugins.cookies.HttpCookies
 import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.http.Cookie
+import io.ktor.http.Url
 import talq.core.TalqCore
 
 /** Platform engine (OkHttp on Android and on the JVM). */
@@ -18,6 +21,13 @@ internal expect fun platformHttpClient(config: HttpClientConfig<*>.() -> Unit): 
  * WebSockets plugin.
  */
 internal expect fun platformWebSocketHttpClient(pingMillis: Long, configure: HttpClientConfig<*>.() -> Unit): HttpClient
+
+/**
+ * [failure] (of a request that got no answer) came before anything could be sent: no address for the
+ * host, or no connection to it. Only what is certain counts; a broken connection or a timeout after
+ * the connection stood may have reached the server.
+ */
+internal expect fun neverLeftThePhone(failure: Throwable): Boolean
 
 /**
  * The client for the call backend's signaling socket: WebSockets, a 30 s ping, a 10 s connect
@@ -45,10 +55,22 @@ fun newTalkHttpClient(userAgent: String = TalqCore.userAgent): HttpClient = plat
     expectSuccess = false
     followRedirects = true
     install(UserAgent) { agent = userAgent }
-    install(HttpCookies) { storage = AcceptAllCookiesStorage() }
+    install(HttpCookies) { storage = OneSessionCookies() }
     install(HttpTimeout) {
         connectTimeoutMillis = 15_000
         requestTimeoutMillis = 30_000
         socketTimeoutMillis = 30_000
+    }
+}
+
+/**
+ * The server's cookies, of ONE of its sessions. Opening an account sends two requests at once, both without
+ * a cookie, and the server starts a session for each: the cookies of one belong together (its id, and the key
+ * its data is sealed with), and those of two answers must not mix. Those of the answer to who the user is are
+ * left out.
+ */
+private class OneSessionCookies(private val kept: CookiesStorage = AcceptAllCookiesStorage()) : CookiesStorage by kept {
+    override suspend fun addCookie(requestUrl: Url, cookie: Cookie) {
+        if (!requestUrl.encodedPath.endsWith("/cloud/user")) kept.addCookie(requestUrl, cookie)
     }
 }
