@@ -147,7 +147,7 @@ fun DiagnosticsScreen(session: TalkSession?, onBack: () -> Unit) {
                             sharing = true
                             scope.launch {
                                 try {
-                                    DiagReport.share(context, DiagReport.text(vm.checks, DiagReport.recentLog()))
+                                    DiagReport.share(context, DiagReport.text(vm.checks, DiagReport.recentLog(), context.appContainer.calls.timeline.text()))
                                 } finally {
                                     sharing = false
                                 }

@@ -2,14 +2,19 @@ package talq.app.call
 
 import android.content.Context
 import android.os.PowerManager
+import android.os.SystemClock
 import android.telecom.DisconnectCause
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +32,12 @@ import talq.core.TalkError
 import talq.core.call.CallEndReason
 import talq.core.call.CallSession
 import talq.core.call.CallMode
+import talq.core.call.HpbConnection
+import talq.core.call.HpbState
+import talq.core.call.PreparedSignaling
 import talq.core.call.PublishRights
+import talq.core.call.SignalingSettings
+import talq.core.call.hpbHost
 import talq.core.call.callOffered
 import talq.core.call.CallState
 import talq.core.call.NotificationState
@@ -101,6 +111,12 @@ class CallController(context: Context, private val container: AppContainer) {
     private val appContext = context.applicationContext
     private val scope = container.scope
     private val telecom = CallTelecom(appContext, scope)
+
+    /** The nearest signaling node, when the server lists several (also read by Diagnostics). */
+    val nodes = NearestHpb(appContext, scope)
+
+    /** The last call's steps with their times (Diagnostics' report, and a file for USB tests). */
+    val timeline = CallTimeline(appContext, scope)
     private val ringback = Ringback()
 
     private val _current = MutableStateFlow<ActiveCall?>(null)
@@ -130,6 +146,110 @@ class CallController(context: Context, private val container: AppContainer) {
 
     /** The last call per conversation, for waiting until it has left before the next one. */
     private val previous = HashMap<String, ActiveCall>()
+
+    /**
+     * Signaling made ready before a call starts. A start used to wait for a dozen round trips in a
+     * row (measured: 6 s from Join or Answer to "In a call"); these are done before the tap now. While a
+     * conversation is open: its settings ([prepare] without connect, kept [PREP_SETTINGS_MS]: the hello
+     * ticket in them ages). While a call rings: also the signaling connection with its hello (kept
+     * [PREP_CONNECTION_MS]). Nothing that anyone else sees: no conversation is entered. One at a time;
+     * main thread. A call that takes it owns its scope, its HTTP client and the connection.
+     */
+    private class Prep(val token: String, val account: TalkSession, val connect: Boolean) {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val http = newHpbHttpClient()
+        val at = SystemClock.elapsedRealtime()
+        /** Completed with the settings once read (null when that failed); the connection follows. */
+        val settingsRead = CompletableDeferred<SignalingSettings?>()
+        @Volatile var settings: SignalingSettings? = null
+        @Volatile var connection: HpbConnection? = null
+        var job: Job? = null
+
+        val fresh: Boolean get() = SystemClock.elapsedRealtime() - at < if (connect) PREP_CONNECTION_MS else PREP_SETTINGS_MS
+
+        /** Let go: says goodbye on the connection, then closes everything (off the main thread). */
+        fun discard() {
+            job?.cancel()
+            val c = connection
+            scope.launch(NonCancellable) {
+                runCatching { c?.close(sayBye = true) }
+                runCatching { http.close() }
+            }.invokeOnCompletion { scope.cancel() }
+        }
+    }
+
+    private var prep: Prep? = null
+
+    /**
+     * Gets a call in [token] ready to start fast: its settings; with [connect] (it rings) also the
+     * signaling connection. Asked again while still fresh, it does nothing.
+     */
+    fun prepare(token: String, connect: Boolean) {
+        val account = container.session ?: return
+        if (!account.checked) return
+        val old = prep
+        if (old != null && old.token == token && old.account === account && (old.connect || !connect) && old.fresh) return
+        // A ringing call's connection is not given up for the settings of the chat on screen.
+        if (old != null && old.connect && !connect && old.fresh) return
+        old?.discard()
+        val p = Prep(token, account, connect)
+        prep = p
+        p.job = p.scope.launch {
+            try {
+                val settings = account.client.signalingSettings(System.currentTimeMillis())
+                p.settings = settings
+                p.settingsRead.complete(settings)
+                // Measured now, so that the tap does not wait for it.
+                if (settings.hasHpb) nodes.warm(settings)
+                if (connect && settings.hasHpb) {
+                    val c = HpbConnection(p.http, settings, account.client.serverUrl, p.scope, nodes = nodes) {
+                        account.client.signalingSettings(System.currentTimeMillis())
+                    }
+                    p.connection = c
+                    timeline.step("ringing: getting the call's signaling ready")
+                    c.connect()
+                    timeline.step("ringing: signaling ready on ${hpbHost(c.node)}")
+                }
+            } catch (e: TalkError) {
+                Log.i(TAG, "getting the call's signaling ready failed (${e::class.simpleName})")
+                if (connect) timeline.step("ringing: signaling not ready (${e::class.simpleName})")
+            } finally {
+                p.settingsRead.complete(p.settings)
+            }
+        }
+    }
+
+    /** The call in [token] will not start (the ring ended unanswered): let its preparation go. */
+    fun unprepare(token: String) {
+        val p = prep?.takeIf { it.token == token } ?: return
+        prep = null
+        p.discard()
+    }
+
+    /**
+     * The preparation for [token], when it is fresh and for this [account]; else none (and it is let
+     * go). Settings still on their way are waited for (the same request the call would make again).
+     * A connection still connecting is handed over as it is: the call's own connect waits for it, and
+     * starts a new one only when it failed. One that failed or was given up is not handed over.
+     */
+    private suspend fun takePrep(token: String, account: TalkSession): Prep? {
+        val p = prep ?: return null
+        prep = null
+        if (p.token != token || p.account !== account || !p.fresh) {
+            p.discard()
+            return null
+        }
+        if (withTimeoutOrNull(PREP_WAIT_MS) { p.settingsRead.await() } == null) {
+            p.discard()
+            return null
+        }
+        val connection = p.connection
+        if (connection != null && connection.state.value.let { it is HpbState.Failed || it == HpbState.Disconnected } && p.job?.isActive != true) {
+            p.connection = null
+            p.scope.launch(NonCancellable) { runCatching { connection.close(sayBye = false) } }
+        }
+        return p
+    }
 
     /** True when a call is running or being set up (not just ended). */
     val busy: Boolean
@@ -210,6 +330,8 @@ class CallController(context: Context, private val container: AppContainer) {
         }
         // A new call replaces the previous call's end screen.
         if (_current.value != null) _current.value = null
+        val tapped = (if (r.incoming) "Answer" else if (r.join) "Join" else "Call") + (if (r.video) " with camera" else "") + " tapped"
+        if (r.incoming) timeline.answer(tapped, r.token) else timeline.begin(tapped, r.token)
         _starting.value = true
         startingToken = r.token
         startCancelled = false
@@ -252,34 +374,46 @@ class CallController(context: Context, private val container: AppContainer) {
             if (container.sessionState.value is SessionState.Unreachable) "The server can't be reached right now." else "You are not signed in.",
         )
         if (startCancelled) return StartResult.Cancelled
+        timeline.step("account ready")
         val room = roomOf(account, r.token) ?: return StartResult.Failed("This conversation could not be found.")
         val joining = r.incoming || r.join
         if (!callOffered(room, hasHpb = true, nowSeconds = System.currentTimeMillis() / 1000, joining = joining)) {
             return StartResult.Failed("Calls aren't possible in this conversation.")
         }
-        if (r.join) {
+        if (r.join || r.incoming) {
             // A Join that comes late must not start a new call (it would ring everyone): the list is
-            // asked again, and the server's word on whether this user is called counts.
-            account.rooms.refresh()
-            if (account.rooms.room(r.token)?.hasCall == false) return StartResult.Gone(answeredElsewhere = false)
-            if (account.capabilities.callNotificationState) {
-                val state = try {
-                    account.client.callNotificationState(r.token)
-                } catch (e: TalkError) {
+            // asked again, and the server's word on whether this user is called counts. Answering a
+            // call that is over would start a new one that rings the caller. Both questions at once.
+            val gone = coroutineScope {
+                val listed = if (r.join) {
+                    async {
+                        account.rooms.refresh()
+                        account.rooms.room(r.token)?.hasCall != false
+                    }
+                } else {
                     null
                 }
-                if (state == NotificationState.Missed) return StartResult.Gone(answeredElsewhere = false)
+                val notified = if (account.capabilities.callNotificationState) {
+                    async {
+                        try {
+                            account.client.callNotificationState(r.token)
+                        } catch (e: TalkError) {
+                            null
+                        }
+                    }
+                } else {
+                    null
+                }
+                val state = notified?.await()
+                when {
+                    listed?.await() == false -> StartResult.Gone(answeredElsewhere = false)
+                    state == NotificationState.Missed -> StartResult.Gone(answeredElsewhere = false)
+                    r.incoming && state == NotificationState.Gone -> StartResult.Gone(answeredElsewhere = true)
+                    else -> null
+                }
             }
-        }
-        if (r.incoming && account.capabilities.callNotificationState) {
-            // Joining a call that is over would start a new one that rings the caller.
-            val state = try {
-                account.client.callNotificationState(r.token)
-            } catch (e: TalkError) {
-                null
-            }
-            if (state == NotificationState.Missed) return StartResult.Gone(answeredElsewhere = false)
-            if (state == NotificationState.Gone) return StartResult.Gone(answeredElsewhere = true)
+            if (gone != null) return gone
+            timeline.step("the call is still on")
         }
         if (startCancelled) return StartResult.Cancelled
         // The last call in this conversation leaves through the same server session: let it
@@ -302,25 +436,42 @@ class CallController(context: Context, private val container: AppContainer) {
             return StartResult.Failed("The call could not be set up on this phone.")
         }
         val engine = built ?: return StartResult.Failed("The call could not be set up on this phone.")
+        timeline.step("media ready")
+        val ready = takePrep(r.token, account)
+        timeline.step(
+            if (ready == null) "nothing prepared"
+            else "prepared: settings " + (if (ready.settings != null) "yes" else "no") +
+                ", connection " + when (ready.connection?.state?.value) {
+                    null -> "none"
+                    is HpbState.Ready -> "ready"
+                    HpbState.Connecting -> "connecting"
+                    HpbState.Resuming -> "resuming"
+                    HpbState.Disconnected -> "closed"
+                    is HpbState.Failed -> "failed"
+                },
+        )
         // Checked on the main thread right before the call is placed: nothing can slip in between.
         if (startCancelled || container.session !== account) {
+            ready?.discard()
             withContext(NonCancellable + Dispatchers.Default) { engine.close() }
             return StartResult.Cancelled
         }
-        launchCall(account, room, r, engine)
+        launchCall(account, room, r, engine, ready)
         return StartResult.Started
     }
 
     /** Everything after the media exists; nothing here waits, so it cannot be cut half-way. */
-    private fun launchCall(account: TalkSession, room: Room, r: StartRequest, engine: WebRtcEngine) {
+    private fun launchCall(account: TalkSession, room: Room, r: StartRequest, engine: WebRtcEngine, ready: Prep?) {
         // Placing a call ends a ring that came meanwhile (as a missed call, unless it is from the
         // very person being called: then both join the same call).
         container.ringer.missCurrent(exceptToken = r.token)
         previous.remove(r.token)?.session?.supersede()
-        // The call's own coroutines run off the main thread; teardown outlives this scope.
-        val callScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val http = newHpbHttpClient()
+        // The call's own coroutines run off the main thread; teardown outlives this scope. A
+        // preparation's scope and client carry its connection, so they become the call's.
+        val callScope = ready?.scope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val http = ready?.http ?: newHpbHttpClient()
         val oneToOne = room.isOneToOne && room.partnerUserId.isNotEmpty()
+        engine.trace = timeline::step
         val session = CallSession(
             client = account.client,
             http = http,
@@ -334,7 +485,9 @@ class CallController(context: Context, private val container: AppContainer) {
             scope = callScope,
             now = { System.currentTimeMillis() },
             recordingConsent = r.recordingConsent,
-            log = { Log.i(TAG, it) },
+            log = { Log.i(TAG, it); timeline.step(it) },
+            prepared = ready?.let { p -> p.settings?.let { PreparedSignaling(it, p.connection) } },
+            nodes = nodes,
         )
         val title = room.displayName.ifBlank { room.partnerUserId.ifBlank { "Call" } }
         val call = ActiveCall(
@@ -482,6 +635,10 @@ class CallController(context: Context, private val container: AppContainer) {
 
     /** Signing out: leave the call properly while the account still works (8 s at most). */
     suspend fun signedOut() {
+        prep?.discard()
+        prep = null
+        nodes.clear()
+        timeline.clear()
         cancelStart()
         withTimeoutOrNull(SIGN_OUT_WAIT_MS) {
             if (_starting.value) _starting.first { !it }
@@ -492,6 +649,10 @@ class CallController(context: Context, private val container: AppContainer) {
 
     /** The account is gone already (401): end the call without waiting for the server. */
     fun abort() {
+        prep?.discard()
+        prep = null
+        nodes.clear()
+        timeline.clear()
         cancelStart()
         hangUp()
         previous.clear()
@@ -526,6 +687,12 @@ class CallController(context: Context, private val container: AppContainer) {
         const val STATE_POLL_MS = 3_000L
         const val RESTORE_GAP_MS = 10_000L
         const val PREVIOUS_WAIT_MS = 10_000L
+        /** Prepared settings: the hello ticket in them ages (an old one costs a refused hello and a new one). */
+        const val PREP_SETTINGS_MS = 60_000L
+        /** A prepared connection: a ring lasts 45 s at most. */
+        const val PREP_CONNECTION_MS = 90_000L
+        /** Settings still on their way when the call starts (one request). */
+        const val PREP_WAIT_MS = 4_000L
         const val MAX_CALL_MS = 6 * 60 * 60 * 1000L
     }
 }

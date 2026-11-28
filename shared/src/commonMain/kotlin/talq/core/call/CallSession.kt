@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -85,6 +86,10 @@ class CallSession(
     /** Join without notifying the conversation (joining a call that runs, never starting one that rings). */
     private val joinSilently: Boolean = false,
     private val log: (String) -> Unit = {},
+    /** Settings, and a connection that said hello, made ready before the call (see [PreparedSignaling]). */
+    private val prepared: PreparedSignaling? = null,
+    /** Which signaling node to use when the server lists several (see `HpbPick.kt`). */
+    private val nodes: HpbNodes = HpbNodes.Named,
 ) {
     private val _state = MutableStateFlow<CallState>(CallState.Connecting)
     val state: StateFlow<CallState> = _state.asStateFlow()
@@ -221,6 +226,10 @@ class CallSession(
 
     /** Everyone else in the call, by signaling session, in the order they were seen. */
     private val links = LinkedHashMap<String, PeerLink>()
+    private var linksMade = 0
+
+    /** Our publisher was offered before the join was confirmed and has no answer yet. */
+    private var earlyOffer = false
 
     /** One-to-one: the adopted peer's session (at most one link there). */
     private val peerSid: String? get() = if (oneToOne != null) links.keys.firstOrNull() else null
@@ -290,24 +299,40 @@ class CallSession(
         setup.join()
     }
 
-    /** Signaling and the room; the call itself is joined by the loop once [Input.InRoom] arrives. */
+    /**
+     * Signaling and the room; the call itself is joined by the loop once [Input.InRoom] arrives.
+     * The conversation is entered while the signaling connects: neither needs the other, and each
+     * is a round trip or more to the server. With [prepared] the settings (and while a call rang,
+     * the connection with its hello) are ready already.
+     */
     private suspend fun setup(cs: CoroutineScope) {
         try {
-            val settings = client.signalingSettings(now())
+            val ready = prepared
+            val settings = ready?.settings ?: client.signalingSettings(now())
+            log(if (ready != null) "signaling settings ready (prepared)" else "signaling settings read")
             if (!settings.hasHpb) {
+                ready?.connection?.close(sayBye = true)
                 inbox.send(Input.End(CallEndReason.NoHpb, "the server has no call backend"))
                 return
             }
             iceServers = settings.iceServers
-            val c = HpbConnection(http, settings, client.serverUrl, cs) { client.signalingSettings(now()) }
+            // Not with the settings request: on a server session that is new, two requests at once
+            // can end in two sessions, and the call must be joined in the conversation's.
+            val entered = cs.async { client.joinRoomSession(token) }
+            val c = ready?.connection ?: HpbConnection(http, settings, client.serverUrl, cs, nodes = nodes) { client.signalingSettings(now()) }
             hpb = c
-            // The events have no replay: listen before connecting.
+            // The events have no replay: listen before connecting (a prepared connection has not
+            // joined a room yet, and nothing comes before that).
             cs.launch(start = CoroutineStart.UNDISPATCHED) { c.events.collect { inbox.send(Input.Hpb(it)) } }
             cs.launch(start = CoroutineStart.UNDISPATCHED) { c.state.collect { inbox.send(Input.Signaling(it)) } }
+            // A prepared connection that is still up answers at once.
             val id = c.connect()
-            val nc = client.joinRoomSession(token)
+            log((if (ready?.connection != null) "signaling connected (prepared)" else "signaling connected") + " on " + hpbHost(c.node))
+            val nc = entered.await()
+            log("in the conversation")
             ncSession = nc
             c.joinRoom(token, nc)
+            log("in the signaling room")
             c.announceClient()
             inbox.send(Input.InRoom(id))
         } catch (e: TalkError) {
@@ -362,12 +387,19 @@ class CallSession(
 
     // ---------------------------------------------------------------- joining
 
-    private fun inRoom(sessionId: String) {
+    private suspend fun inRoom(sessionId: String) {
         if (ownId.isEmpty()) setOwn(sessionId)
         inRoom = true
         log("in the room; joining the call")
         if (oneToOne != null) startTimer(TimerKind.NoAnswer, NO_ANSWER_MS)
         postJoin(silent = joinSilently)
+        // Our media is offered while the join is on its way (its answer is the slowest step): the
+        // signaling server takes a publisher from a session in the room. Refused that early, it is
+        // offered again once the join is confirmed (see hpbError).
+        if (!joined && pubSid == null) {
+            earlyOffer = true
+            publish()
+        }
     }
 
     private fun postJoin(silent: Boolean) {
@@ -406,6 +438,13 @@ class CallSession(
             e is TalkError.NotFound && !reenteredRoom -> {
                 reenteredRoom = true
                 log("joining the call answered 404; entering the conversation again")
+                // An early offer belonged to the room session that is left now: offered anew after the join.
+                if (earlyOffer) {
+                    earlyOffer = false
+                    pubSid = null
+                    cancelTimer(TimerKind.PublishDeadline)
+                    engine.closePublisher()
+                }
                 reenterRoom()
             }
             else -> end(CallEndReason.Failed, "joining the call was refused (${e::class.simpleName})")
@@ -437,7 +476,9 @@ class CallSession(
         log("in the call ($how)")
         // A mute or camera switch made while the join was on its way.
         if (flags() != postedFlags) updateFlags()
-        publish()
+        // Offered already while the join was on its way (inRoom): not twice. A mute or camera switch
+        // meanwhile went to that publisher directly (engine.setLocalAudio / setLocalVideo).
+        if (pubSid == null) publish()
         for (l in links.values) requestCamera(l)
         if (links.isEmpty() || links.values.any { waitingForMedia(it) }) startTimer(TimerKind.Poll, FIRST_POLL_MS)
         // A group call: nobody else for a minute from the confirmed join (a slow join must not count).
@@ -450,7 +491,11 @@ class CallSession(
      * call a publisher that was refused or failed too often stays given up: listening.
      */
     private suspend fun publish() {
-        if (pubSid != null && !pubAnswered) supersededOffers++
+        if (pubSid != null && !pubAnswered) {
+            supersededOffers++
+            // A refusal of the replaced early offer is then "an earlier offer" (hpbError), not this one's.
+            earlyOffer = false
+        }
         if (!rightsNow.any || pubGivenUp) {
             pubSid = null
             pubRebuildPending = false
@@ -478,6 +523,7 @@ class CallSession(
             if (rightsNow.video) put("videocodec", VIDEO_CODECS)
         }
         send(ownId, "offer", signal(ownId, "offer", sid.toString(), payload = sdpPayload("offer", sdp), extra = extra))
+        log("sending: offer sent")
     }
 
     // ---------------------------------------------------------------- who is in the call
@@ -516,6 +562,7 @@ class CallSession(
     /** Someone new in a group call (or the one-to-one peer adopted): a tile, our mute state, their media. */
     private fun newLink(sid: String): PeerLink {
         val l = PeerLink(sid)
+        l.number = ++linksMade
         l.userId = sessionUser[sid].orEmpty()
         l.name = sessionName[sid].orEmpty()
         l.wantedSubstream = if (oneToOne != null) 2 else 1
@@ -527,6 +574,8 @@ class CallSession(
         if (!camOn) send(sid, "mute", signal(sid, "mute", "", payload = buildJsonObject { put("name", "video") }))
         log(if (oneToOne != null) "the other person is in the call" else "someone joined the call (${links.size} others)")
         publishParticipants()
+        // Answered: the state says so now (the ringing tone stops), not only once their media is offered.
+        refreshState()
         return l
     }
 
@@ -698,6 +747,7 @@ class CallSession(
         l.offerRequests++
         l.offerRequested = true
         send(l.sid, "requestoffer", requestOffer(l.sid))
+        log("asked for ${whose(l)} media (${l.offerRequests})")
         // The backend refuses it until the other side publishes: ask again until an offer comes.
         // A retry from an earlier request is recognised by its generation and dropped.
         val generation = ++l.offerGeneration
@@ -746,6 +796,7 @@ class CallSession(
             return
         }
         send(l.sid, "answer", signal(l.sid, "answer", s.sid, roomType = kind.roomType, payload = sdpPayload("answer", answer)))
+        log("${whose(l)} ${kind.name.lowercase()} offered, answered")
         l.early.remove(s.sid)?.forEach { remoteCandidate(key, it) }
         // Desktop's rejoin lesson: a screen offer from someone whose camera is not here asks for it too.
         if (kind == StreamKind.Screen) requestCamera(l)
@@ -796,6 +847,7 @@ class CallSession(
                 if (l.state[kind] == c) continue
                 l.state[kind] = c
                 changed = true
+                log("receiving ${kind.name.lowercase()} from ${who(l)}: ${c.name.lowercase()}")
                 when (c) {
                     MediaConnection.Connected -> {
                         l.stallJobs.remove(kind)?.cancel()
@@ -932,6 +984,15 @@ class CallSession(
                 log("an earlier offer was refused; the current one waits for its answer")
                 return
             }
+            if (earlyOffer) {
+                // The offer made before the join was confirmed: not a refusal of this user's sending.
+                earlyOffer = false
+                pubSid = null
+                cancelTimer(TimerKind.PublishDeadline)
+                log("the early offer was refused; offering again in the call")
+                if (joined) publish()
+                return
+            }
             _notice.value = REFUSED_NOTICE
             if (oneToOne == null) {
                 pubGivenUp = true
@@ -957,6 +1018,8 @@ class CallSession(
                 // Any sid: a stock backend keeps answering a rebuilt publisher with the first sid.
                 "answer" -> if (pubSid != null && !pubAnswered) {
                     pubAnswered = true
+                    earlyOffer = false
+                    log("sending: answer arrived")
                     supersededOffers = 0
                     try {
                         engine.setPublisherAnswer(s.payload.str("sdp"))
@@ -1094,6 +1157,7 @@ class CallSession(
 
     /** What we send. A failed publisher is replaced (Reconnecting meanwhile, 45 s at most). */
     private suspend fun publisherState(c: MediaConnection) {
+        if (pubState != c) log("sending: ${c.name.lowercase()}")
         pubState = c
         when (c) {
             MediaConnection.Connected -> {
@@ -1371,9 +1435,25 @@ class CallSession(
         while (true) {
             val cur = _state.value
             if (cur is CallState.Ended || cur == s) return
-            if (_state.compareAndSet(cur, s)) return
+            if (_state.compareAndSet(cur, s)) {
+                if (cur::class != s::class) log("state: " + stateName(s))
+                return
+            }
         }
     }
+
+    /** Spelt out: a shrunk build renames the classes. */
+    private fun stateName(s: CallState): String = when (s) {
+        CallState.Connecting -> "connecting"
+        CallState.WaitingForPeer -> "waiting for the other side"
+        is CallState.Active -> "in the call with someone"
+        CallState.Reconnecting -> "reconnecting"
+        is CallState.Ended -> "ended"
+    }
+
+    /** Who a link is in the call log: never a name or an id. */
+    private fun who(l: PeerLink): String = if (oneToOne != null) "them" else "person ${l.number}"
+    private fun whose(l: PeerLink): String = if (oneToOne != null) "their" else "person ${l.number}'s"
 
     /** Ends the call once (the first reason wins) and tears everything down beside the caller. */
     private fun end(reason: CallEndReason, why: String) {
@@ -1443,6 +1523,8 @@ class CallSession(
                 }
             }
             c?.close(sayBye = true)
+            // Ended before the setup took the prepared connection over: it is this call's all the same.
+            if (c == null) prepared?.connection?.let { runCatching { it.close(sayBye = true) } }
         } finally {
             work?.cancel()
             done.complete()

@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import talq.app.Brand
+import talq.app.BuildConfig
 import talq.app.R
 import talq.app.appContainer
 import talq.app.appName
@@ -133,6 +134,12 @@ fun LoginScreen() {
                     Spacer(Modifier.height(20.dp))
                 }
                 Text(org?.name ?: appName, style = MaterialTheme.typography.displaySmall)
+                // Which version this is, before anything else is asked (a tester's first question).
+                Text(
+                    "$appName for Android ${BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TalqTheme.colors.textMuted,
+                )
                 Spacer(Modifier.height(6.dp))
                 Text(
                     org?.welcome

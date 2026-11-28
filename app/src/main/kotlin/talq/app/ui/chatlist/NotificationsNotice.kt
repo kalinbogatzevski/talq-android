@@ -84,6 +84,15 @@ sealed interface NotifyProblem {
         override val text = "Notifications aren't working"
         override val state = "push"
     }
+
+    /**
+     * The server refuses web push (its admin setting is off): only its admin can fix it, and the app
+     * has no other way to be woken there, so the line says where the problem is.
+     */
+    data object ServerOff : NotifyProblem {
+        override val text = "Push is off on your server"
+        override val state = "server-off"
+    }
 }
 
 /**
@@ -105,7 +114,8 @@ fun rememberNotifyProblem(push: PushRegistrar, notices: NotifyNoticeStore, accou
     val problem = when {
         askingFirst -> null
         onPhone != null -> onPhone
-        status is PushStatus.Error || status == PushStatus.NoDistributor || status == PushStatus.ServerDisabled -> NotifyProblem.PushFailed
+        status == PushStatus.ServerDisabled -> NotifyProblem.ServerOff
+        status is PushStatus.Error || status == PushStatus.NoDistributor -> NotifyProblem.PushFailed
         else -> null
     }
     // All well counts as fixed only once push is really up.
@@ -130,7 +140,7 @@ fun fixNotifications(context: Context, problem: NotifyProblem, onOpenPushSetting
     when (problem) {
         NotifyProblem.Blocked -> openNotificationSettings(context)
         is NotifyProblem.ChannelOff -> openChannelSettings(context, problem.channelId)
-        NotifyProblem.PushFailed -> onOpenPushSettings()
+        NotifyProblem.PushFailed, NotifyProblem.ServerOff -> onOpenPushSettings()
     }
 }
 
@@ -145,7 +155,7 @@ fun NotificationsNotice(problem: NotifyProblem, onFix: () -> Unit, onDismiss: ()
             .padding(start = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        StatusDisc(if (problem == NotifyProblem.PushFailed) colors.amber else colors.danger)
+        StatusDisc(if (problem == NotifyProblem.PushFailed || problem == NotifyProblem.ServerOff) colors.amber else colors.danger)
         Spacer(Modifier.width(8.dp))
         Text(
             problem.text,

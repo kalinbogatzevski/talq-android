@@ -684,7 +684,21 @@ class ChatRepository internal constructor(
                 }
                 continue
             }
-            if (accepts(m)) byId[m.id] = m
+            // A topic someone else starts can come in through the feed before the server made the topic (its
+            // root then has no topic yet, as TextOutbox.onArrived explains for own sends), and nothing updates
+            // that root later. Its topic's notice does: the topic id is the root's id.
+            val root = if (m.isTopicCreatedNotice && m.topicId != 0L) byId[m.topicId] else null
+            if (root != null && root.topicId == 0L) {
+                val now = (m.parent?.takeIf { it.id == root.id }?.let { root.changedTo(it) } ?: root).let {
+                    if (it.topicId != 0L) it
+                    else it.copy(isThread = true, threadId = root.id, threadTitle = it.threadTitle.ifEmpty { m.threadTitle })
+                }
+                if (accepts(now)) byId[root.id] = now else byId.remove(root.id)
+            }
+            // Held here but filed in another topic by the server now (such a root, read again by a page): it
+            // leaves. Only a copy that names a topic says so: the answer to an own post carries no topic
+            // fields, and must not push the feed's full copy out of the topic view (smoke --write).
+            if (accepts(m)) byId[m.id] = m else if (m.topicId != 0L) byId.remove(m.id)
         }
         return byId.values.sortedBy { it.id }
     }

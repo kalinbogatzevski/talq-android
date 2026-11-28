@@ -129,7 +129,18 @@ fun SettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Settings", style = MaterialTheme.typography.titleLarge) },
+                // The version is what a tester reads out first: in the bar, not only at the end of About.
+                title = {
+                    Column {
+                        Text("Settings", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "$appName for Android ${BuildConfig.VERSION_NAME}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.textSecondary,
+                            maxLines = 1,
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -619,7 +630,7 @@ private fun describe(status: PushStatus, appName: String): Triple<String, String
     )
     PushStatus.ServerDisabled -> Triple(
         "Off on the server",
-        "Web push is off on the server. Ask your administrator.",
+        "Web push is off on the server: ask its admin to turn it on. Diagnostics has the command.",
         Tone.Neutral,
     )
     PushStatus.Registering -> Triple("Setting up…", null, Tone.Neutral)

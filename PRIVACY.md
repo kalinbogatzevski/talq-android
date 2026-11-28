@@ -3,7 +3,7 @@
 TalQ for Android is a client for **your own Nextcloud server**. Its developer runs no server
 for it and collects nothing: no analytics, no advertising, no trackers, no crash reports.
 
-This text is about version 0.12.0.
+This text is about version 0.12.1.
 
 ## What stays on the phone
 
@@ -123,7 +123,12 @@ leave the phone; the rest is kept as it is.
   microphone's level; no sound is kept). Where a direct path is blocked they go through the TURN relay servers
   your Nextcloud names. To find a path, your phone's local and public internet addresses go to the call
   backend and to those servers. If your Nextcloud names no STUN server, the app uses Nextcloud's public
-  one, `stun.nextcloud.com`, which then sees your phone's public internet address. The app keeps no recording and no call history of its own; where your server
+  one, `stun.nextcloud.com`, which then sees your phone's public internet address. Where your Nextcloud lists
+  more than one signaling server, the phone opens a few empty connections to each of them (once per network
+  and half hour, sending nothing) to use the nearest; what it measured is kept in memory only. The
+  steps of the last call and their times (no names, no ids, no addresses but the signaling server's)
+  are kept in the app's own folder until the next call, for "Share report" and for a computer
+  connected by USB. The app keeps no recording and no call history of its own; where your server
   records calls only with consent, the app asks you before it joins one.
 - **Microphone and camera**: the microphone is used during a call you placed or answered, while the
   call's notification is showing, and while you record a voice message: from your touch on the
@@ -134,7 +139,7 @@ leave the phone; the rest is kept as it is.
   what a push announces and, on Honor and Huawei home screens, reloads the conversation list about
   twice an hour for the number on its icon. All of that is between the phone and your server.
 - **Diagnostics** (in Settings): only while that screen is open, the app tests your server, its
-  signaling server and the STUN and TURN servers your Nextcloud names. "Share report" hands a text
+  signaling servers and the STUN and TURN servers your Nextcloud names. "Share report" hands a text
   file to the app you choose: the results; your server, its versions, and its signaling, STUN and TURN
   hosts; your account name; the phone's maker, model and Android version, and the Google Play services
   version; the network type, VPN, proxy and private DNS; battery and notification settings; when the

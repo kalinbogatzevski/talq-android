@@ -18,7 +18,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -65,6 +67,13 @@ sealed interface HpbState {
  * [refreshSettings] fetches a fresh ticket for a new session after the first (the ticket in
  * [settings] may have expired by then). The ticket is never logged. [reconnect] false: a lost
  * connection is not reopened (nor the room joined again); the state is then [HpbState.Failed].
+ *
+ * The node: the first [connect] asks [nodes] (see `HpbPick.kt`). A node other than the named one
+ * ([SignalingSettings.server]) gets [TRY_NODE_MS] to say hello; when it fails or refuses, it is
+ * reported to [nodes] and the named node is used from then on, with the whole [CONNECT_TIMEOUT_MS]
+ * (so the worst case is their sum). A resume always goes to the node that said hello (a session
+ * lives on one node); once the resume window has passed, the new session goes to the named node:
+ * the chosen one may be gone, and the named one always takes the ticket.
  */
 class HpbConnection(
     private val http: HttpClient,
@@ -72,11 +81,24 @@ class HpbConnection(
     ncServerUrl: String,
     private val scope: CoroutineScope,
     private val reconnect: Boolean = true,
+    private val nodes: HpbNodes = HpbNodes.Named,
     private val refreshSettings: (suspend () -> SignalingSettings)? = null,
 ) {
     private val backendUrl = ncServerUrl.trimEnd('/') + "/ocs/v2.php/apps/spreed/api/v3/signaling/backend"
 
     @Volatile private var settings = settings
+
+    /** Asked [nodes] already (once per connection). */
+    @Volatile private var nodeAsked = false
+
+    /** A node other than the named one, while it is to be used; null = the named node. */
+    @Volatile private var chosen: String? = null
+
+    /** The node that said the last hello: where a resume must go. */
+    @Volatile private var helloNode: String? = null
+
+    /** The node in use, or about to be. */
+    val node: String get() = helloNode ?: chosen ?: settings.server
 
     private val _state = MutableStateFlow<HpbState>(HpbState.Disconnected)
     val state: StateFlow<HpbState> = _state.asStateFlow()
@@ -104,15 +126,30 @@ class HpbConnection(
      */
     suspend fun connect(): String = lifecycle.withLock {
         (state.value as? HpbState.Ready)?.let { return@withLock it.sessionId }
-        loop?.cancelAndJoin()
-        closing = false
-        val first = CompletableDeferred<String>()
-        loop = scope.launch { run(first) }
+        if (!nodeAsked) {
+            nodeAsked = true
+            val home = hpbHost(settings.server)
+            chosen = nodes.choose(settings).takeIf { hpbHost(it).let { h -> h.isNotEmpty() && h != home } }
+        }
+        chosen?.let { trial ->
+            try {
+                return@withLock open(TRY_NODE_MS).also { nodes.connected(trial) }
+            } catch (e: Throwable) {
+                // Our own time limit, not the caller giving up (that cancels this coroutine).
+                val ours = e is TimeoutCancellationException && currentCoroutineContext().isActive
+                if (e is kotlinx.coroutines.CancellationException && !ours) {
+                    _state.value = HpbState.Disconnected
+                    throw e
+                }
+                // Not reached, refused, or too slow: the named node takes over.
+                chosen = null
+                helloNode = null
+                nodes.failed(trial)
+            }
+        }
         try {
-            withTimeout(CONNECT_TIMEOUT_MS) { first.await() }
+            open(CONNECT_TIMEOUT_MS).also { nodes.connected(settings.server) }
         } catch (e: Throwable) {
-            withContext(NonCancellable) { loop?.cancelAndJoin() }
-            loop = null
             when (e) {
                 is TimeoutCancellationException -> {
                     _state.value = HpbState.Failed("no answer from the signaling server")
@@ -127,6 +164,21 @@ class HpbConnection(
                     throw e
                 }
             }
+        }
+    }
+
+    /** Starts the socket's owner and waits up to [timeoutMs] for its first hello; stops it on failure. */
+    private suspend fun open(timeoutMs: Long): String {
+        loop?.cancelAndJoin()
+        closing = false
+        val first = CompletableDeferred<String>()
+        loop = scope.launch { run(first) }
+        try {
+            return withTimeout(timeoutMs) { first.await() }
+        } catch (e: Throwable) {
+            withContext(NonCancellable) { loop?.cancelAndJoin() }
+            loop = null
+            throw e
         }
     }
 
@@ -209,6 +261,7 @@ class HpbConnection(
             while (outbox.tryReceive().isSuccess) { }
             sessionId = ""
             resumeId = null
+            helloNode = null
             room = null
             features = emptySet()
             _state.value = HpbState.Disconnected
@@ -225,11 +278,14 @@ class HpbConnection(
             val resuming = resumeId != null
             _state.value = if (resuming) HpbState.Resuming else HpbState.Connecting
             var rejected: String? = null
+            // A session lives on the node that made it: a resume goes there, whatever settings say now.
+            val target = (if (resuming) helloNode else null) ?: chosen ?: settings.server
             try {
-                http.webSocket(urlString = hpbWebSocketUrl(settings.server)) {
+                http.webSocket(urlString = hpbWebSocketUrl(target)) {
                     socket = this
                     try {
                         handshake(resuming)
+                        helloNode = target
                         failures = 0
                         droppedAt = null
                         if (!first.isCompleted) first.complete(sessionId)
@@ -281,6 +337,9 @@ class HpbConnection(
             if (resumeId != null && since.elapsedNow().inWholeMilliseconds >= RESUME_WINDOW_MS) {
                 resumeId = null
                 failures = 1
+                // The session is lost anyway: the new one goes to the named node (the chosen one
+                // may be what went away). Not reported as failed: the phone's own network may have been.
+                chosen = null
             }
             delay(
                 when {
@@ -371,6 +430,9 @@ class HpbConnection(
 
     private companion object {
         const val CONNECT_TIMEOUT_MS = 15_000L
+
+        /** A chosen node that is not the named one (desktop's verify bound: slower is not worth it). */
+        const val TRY_NODE_MS = 5_000L
         const val HELLO_TIMEOUT_MS = 10_000L
         const val ROOM_TIMEOUT_MS = 15_000L
         const val LEAVE_TIMEOUT_MS = 5_000L

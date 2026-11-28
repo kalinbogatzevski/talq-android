@@ -37,7 +37,7 @@ object DiagReport {
     /** The query of any address, whatever its scheme (`talq://organisation?code=…` included). */
     private val QUERY = Regex("""([a-z][a-z0-9+.-]*)://([^\s/?#]*)([^\s?#]*)\?\S*""", RegexOption.IGNORE_CASE)
 
-    fun text(checks: List<Check>, log: String): String = buildString {
+    fun text(checks: List<Check>, log: String, lastCall: String = ""): String = buildString {
         append("TalQ diagnostics\n================\n")
         append("Generated: ").append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.ROOT).format(Date())).append('\n')
         var group = ""
@@ -47,7 +47,9 @@ object DiagReport {
                 append("\n[").append(group).append("]\n")
             }
             append(mark(c.health)).append(' ').append(c.title).append(": ").append(c.detail).append('\n')
+            c.reportNote?.let { append("     ").append(it).append('\n') }
         }
+        if (lastCall.isNotBlank()) append("\n[Last call]\n").append(redact(lastCall)).append('\n')
         append("\n[Recent log]\n").append(log.ifBlank { "(empty)" }).append('\n')
     }
 

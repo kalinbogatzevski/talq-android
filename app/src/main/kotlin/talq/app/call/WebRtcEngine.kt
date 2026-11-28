@@ -150,7 +150,11 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         var lastPackets = -1L
         var lastGrowth = 0L
         var speaking = false
+        var heard = false
     }
+
+    /** Steps for the call's timeline (the first sound received from each person). Any thread. */
+    @Volatile var trace: ((String) -> Unit)? = null
 
     // Written under lock; read anywhere (volatile), in particular by the callbacks.
     @Volatile private var closed = false
@@ -580,6 +584,10 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         val now = SystemClock.elapsedRealtime()
         if (s.lastPackets < 0 || packets > s.lastPackets) s.lastGrowth = now
         s.lastPackets = packets
+        if (!s.heard && packets > 0) {
+            s.heard = true
+            trace?.invoke("first sound received (${subs.size} receiving)")
+        }
         val speaking = level > REMOTE_SPEAKING_LEVEL
         if (speaking != s.speaking) {
             s.speaking = speaking

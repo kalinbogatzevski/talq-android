@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.1
+
+- **Calls start faster**: answering a call, or joining one that runs, takes about 4 s instead of 6. While a call
+  rings the phone gets ready to join it, while a conversation is open it reads what a call there needs, and the
+  steps of joining that do not wait for each other now run side by side.
+- **Calls go through the nearest signaling server**: where your server lists several, the phone measures
+  which one answers fastest from where you are (once per network and half hour) and uses it; should it
+  fail, the call goes through the one your server named. Diagnostics shows each with its time.
+- **The version** is at the top of Settings and on the sign-in screen.
+- **Push off on the server**: the conversation list says "Push is off on your server", Settings and
+  Diagnostics say that its admin can turn it on, and the shared Diagnostics report has the command for that.
+- **A topic someone else starts** leaves General as soon as the server has made it: its first message no
+  longer stays there, nor counts there as unread.
+- **"Next" topic button**: it also goes to a topic set to Never where someone named you (its "@" is red).
+- **Your own sound and picture are ready a second sooner**: the phone offers them while it is still
+  joining the call, not after the server has confirmed the join.
+- **You see when they answer**: the ringing tone stops the moment the other side joins, and the call
+  says "Answered · connecting…" until their sound arrives.
+- **Diagnostics report**: it now has the steps of the last call with their times, to find out where a
+  slow call lost its time.
+
 ## 0.12.0
 
 - **Group calls**: group and public conversations have the call buttons too. A call that runs in a

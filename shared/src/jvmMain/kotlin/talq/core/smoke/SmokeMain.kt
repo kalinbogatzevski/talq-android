@@ -26,6 +26,13 @@ import talq.core.call.SubscriberKey
 import talq.core.call.CallMode
 import talq.core.call.SentSignal
 import talq.core.call.HpbConnection
+import talq.core.call.HpbNodes
+import talq.core.call.HpbPickReason
+import talq.core.call.HpbProbeSample
+import talq.core.call.SignalingSettings
+import talq.core.call.hpbCandidates
+import talq.core.call.hpbHost
+import talq.core.call.pickHpb
 import talq.core.call.HpbInbound
 import talq.core.call.HpbState
 import talq.core.call.helloV1
@@ -317,9 +324,9 @@ object SmokeMain {
     }
 
     /**
-     * In a ONE-TO-ONE room Talk turns a reaction into the room's last message and counts it as
-     * unread (a group room does neither; seen live 2026-11-22). Reading up to the newest visible
-     * message must still clear it. Uses the bots' own one-to-one conversation.
+     * In a ONE-TO-ONE room Talk 25.0.7 turned a reaction into the room's last message and counted it
+     * as unread (a group room did neither; seen live 2026-11-22); 25.0.8 no longer counts it. Reading up
+     * to the newest visible message must leave nothing unread. Uses the bots' own one-to-one conversation.
      */
     private suspend fun directReactionCheck(a: TalkSession, b: TalkSession) {
         println("\n== WRITE: a reaction in a one-to-one room does not stay unread")
@@ -335,9 +342,9 @@ object SmokeMain {
         delay(1000)
         a.rooms.refresh()
         val before = a.rooms.room(dm)
-        check("the reaction counts as unread in a one-to-one room (the server's behaviour)",
-            before?.unreadMessages == 1 && before.lastMessage?.isSystem == true,
-            "unread=${before?.unreadMessages} last=${before?.lastMessage?.systemMessage}")
+        // Talk 25.0.7 counted it as unread; 25.0.8 no longer does (seen 2026-11-28). Either way, reading
+        // to the bottom must leave nothing unread: that is what is checked.
+        println("  server: a reaction in a one-to-one room leaves unread=${before?.unreadMessages} last=${before?.lastMessage?.systemMessage}")
         // What the app does when the chat is open at the bottom: the newest VISIBLE message is
         // A's own one (the reaction is folded into it).
         val tracker = a.unread(dm)
@@ -376,15 +383,22 @@ object SmokeMain {
             parseHpb("""{"type":"event","event":{"target":"participants","type":"update","update":{"all":"\"1","users":$users}}}""") is
                 HpbInbound.ParticipantsUpdate)
         check("hello carries the ticket", "\"ticket\":\"t1\"" in helloV1("https://nc/backend", "u1", "t1"))
+        nodeRuleChecks()
 
         val b = TalkSession.open(credsB)
         val http = newHpbHttpClient()
-        val hpbA = HpbConnection(http, a.client.signalingSettings(), a.client.serverUrl, this)
-        val hpbB = HpbConnection(http, b.client.signalingSettings(), b.client.serverUrl, this)
+        val sigA = a.client.signalingSettings()
+        val sigB = b.client.signalingSettings()
+        // B on another listed node, when there is one: the room's events must cross the cluster.
+        val other = hpbCandidates(sigB).drop(1).firstOrNull()
+        val hpbA = HpbConnection(http, sigA, a.client.serverUrl, this)
+        val hpbB = HpbConnection(http, sigB, b.client.serverUrl, this, nodes = FixedNode(other ?: sigB.server))
         try {
             val idA = hpbA.connect()
             val idB = hpbB.connect()
             check("hello gives session ids", idA.isNotEmpty() && idB.isNotEmpty() && idA != idB)
+            if (other != null) check("B said hello on the other node", hpbHost(hpbB.node) == hpbHost(other) && hpbHost(other) != hpbHost(sigB.server))
+            else println("  (the server lists one node: B is on the named one)")
             val ready = hpbA.state.value as? HpbState.Ready
             println("  HPB features = ${ready?.features?.sorted()}")
             check("HPB advertises mcu", ready != null && "mcu" in ready.features)
@@ -419,6 +433,44 @@ object SmokeMain {
             b.close()
         }
         check("closed", hpbA.state.value == HpbState.Disconnected && hpbB.state.value == HpbState.Disconnected)
+
+        // A chosen node that does not answer: the named node takes over, and the dead one is reported.
+        val dead = FixedNode("https://127.0.0.1:9/standalone-signaling/")
+        val http2 = newHpbHttpClient()
+        val hpbC = HpbConnection(http2, a.client.signalingSettings(), a.client.serverUrl, this, nodes = dead)
+        try {
+            val id = runCatching { hpbC.connect() }.getOrNull()
+            check("a dead chosen node falls back to the named one",
+                id != null && hpbHost(hpbC.node) == hpbHost(sigA.server) && dead.failedHosts == listOf("127.0.0.1"),
+                "node=${hpbHost(hpbC.node)} failed=${dead.failedHosts}")
+        } finally {
+            hpbC.close(sayBye = true)
+            http2.close()
+        }
+    }
+
+    /** Always the given node; remembers what was reported failed. */
+    private class FixedNode(val url: String) : HpbNodes {
+        val failedHosts = mutableListOf<String>()
+        override suspend fun choose(settings: SignalingSettings): String = url
+        override fun failed(server: String) { failedHosts += hpbHost(server) }
+        override fun connected(server: String) {}
+    }
+
+    /** The nearest-node rule (desktop's pickHpb) and the candidate list, without a network. */
+    private fun nodeRuleChecks() {
+        check("node host", hpbHost("https://H.example:8443/sig/") == "h.example" && hpbHost("wss://[::1]:443/x") == "[::1]" && hpbHost("") == "")
+        val s = SignalingSettings("https://a.example/sig/", listOf("https://a.example/sig/", "https://b.example/sig/"), "u", "t", emptyList(), 0)
+        check("candidates: named first, one per host", hpbCandidates(s) == listOf("https://a.example/sig/", "https://b.example/sig/"))
+        fun pick(vararg c: HpbProbeSample) = pickHpb(c.toList())
+        val inc = HpbProbeSample(210, 4, isIncumbent = true)
+        check("node: nearer by the margin wins", pick(inc, HpbProbeSample(12, 4)).let { it.index == 1 && it.reason == HpbPickReason.SwitchedByMargin })
+        check("node: one sample does not displace", pick(inc, HpbProbeSample(12, 1)).let { it.index == 0 && it.reason == HpbPickReason.Sticky })
+        check("node: within the margin stays", pick(HpbProbeSample(40, 4, isIncumbent = true), HpbProbeSample(20, 4)).index == 0)
+        check("node: silent incumbent gives way", pick(HpbProbeSample(-1, 0, isIncumbent = true), HpbProbeSample(90, 1)).let {
+            it.index == 1 && it.reason == HpbPickReason.IncumbentSilent })
+        check("node: held down does not displace", pick(inc, HpbProbeSample(12, 4, heldDown = true)).let { it.index == 0 && it.reason == HpbPickReason.HeldDown })
+        check("node: nobody answers keeps the named", pick(HpbProbeSample(isIncumbent = true), HpbProbeSample()).index == -1)
     }
 
     private suspend fun awaitEvent(hpb: HpbConnection, millis: Long, match: (HpbInbound) -> Boolean): Boolean =
@@ -577,6 +629,8 @@ object SmokeMain {
         val confirmed = withTimeoutOrNull(20_000) {
             topicB.state.first { s -> s.outbox.none { it.referenceId == key } || s.outbox.any { it.referenceId == key && it.error != null } }
         }
+        // B's topic view is not live (no start): an own message reaches such a view through a page only.
+        if (confirmed != null) topicB.refresh()
         val reply = topicB.state.value.messages.lastOrNull { it.referenceId == key }
         check("B's reply was confirmed and left the outbox", confirmed != null && reply != null,
             topicB.state.value.outbox.firstOrNull()?.error?.message ?: "")

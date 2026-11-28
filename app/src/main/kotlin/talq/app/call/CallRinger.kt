@@ -99,11 +99,13 @@ class CallRinger(context: Context, private val container: AppContainer) {
         }
         stopRinging()
         if (joinNid != 0L) clearJoin()
+        calls.timeline.begin("call push", token)
         val ring = Ringing(nid, token, name, room?.partnerUserId.orEmpty(), oneToOne = room?.isOneToOne)
         _ringing.value = ring
         avatar = null
         deadline = System.currentTimeMillis() + RING_TIMEOUT_MS
         post(ring)
+        calls.timeline.step("ringing")
         TalqRingService.start(appContext)
         job = scope.launch { follow(ring) }
         refineJob = scope.launch { refine(ring) }
@@ -112,7 +114,10 @@ class CallRinger(context: Context, private val container: AppContainer) {
 
     /** A delete push for these server notifications: answered or dismissed elsewhere. */
     fun stop(nids: Collection<Long>) {
-        if (_ringing.value?.let { it.nid in nids } == true) stopRinging()
+        if (_ringing.value?.let { it.nid in nids } == true) {
+            container.calls.timeline.step("ringing stopped: its notification was taken back")
+            stopRinging()
+        }
         nids.forEach { CallNotifications.cancel(appContext, it) }
     }
 
@@ -152,7 +157,7 @@ class CallRinger(context: Context, private val container: AppContainer) {
         val ring = _ringing.value?.takeIf { it.nid == nid }
         if (ring != null) {
             answeredRing = ring
-            stopRinging()
+            stopRinging(keepPrep = true)
         }
     }
 
@@ -163,6 +168,7 @@ class CallRinger(context: Context, private val container: AppContainer) {
     fun answerSettled(nid: Long, answered: Boolean) {
         val ring = answeredRing?.takeIf { it.nid == nid } ?: return
         answeredRing = null
+        if (!answered) container.calls.unprepare(ring.token)
         when {
             answered -> Unit
             ring.oneToOne == false -> offerJoin(ring)
@@ -189,6 +195,7 @@ class CallRinger(context: Context, private val container: AppContainer) {
 
     private suspend fun follow(ring: Ringing) {
         var lastRestore = 0L
+        var lastState: NotificationState? = null
         var session: TalkSession? = null
         while (_ringing.value?.nid == ring.nid) {
             val now = System.currentTimeMillis()
@@ -209,6 +216,10 @@ class CallRinger(context: Context, private val container: AppContainer) {
                         null // the next poll tries again
                     }
                     if (_ringing.value?.nid != ring.nid) return
+                    if (state != lastState) {
+                        lastState = state
+                        container.calls.timeline.step("notification-state: ${state?.name ?: "no answer"}")
+                    }
                     when (state) {
                         // A group call that is over leaves nothing (the server tells of missed group calls itself).
                         NotificationState.Missed -> return if (_ringing.value?.oneToOne == false) stopRinging() else missed(ring)
@@ -224,6 +235,8 @@ class CallRinger(context: Context, private val container: AppContainer) {
     /** The caller's name from the conversation list, and their picture (a group call: the conversation's). */
     private suspend fun refine(ring: Ringing) {
         val session = awaitSession() ?: return
+        // While it rings, the call's signaling gets ready: an answer then only joins.
+        if (_ringing.value?.nid == ring.nid) container.calls.prepare(ring.token, connect = true)
         // Tried again while it rings: a cold start may have no network for a moment.
         var room = session.rooms.room(ring.token)
         while (room == null) {
@@ -308,8 +321,12 @@ class CallRinger(context: Context, private val container: AppContainer) {
         joinNid = 0L
     }
 
-    private fun stopRinging() {
+    /** [keepPrep]: answered, the call takes the signaling made ready while it rang. */
+    private fun stopRinging(keepPrep: Boolean = false) {
+        val ring = _ringing.value
         _ringing.value = null
+        if (ring != null) container.calls.timeline.step(if (keepPrep) "ringing stopped: answered" else "ringing stopped")
+        if (ring != null && !keepPrep) container.calls.unprepare(ring.token)
         job?.cancel()
         job = null
         refineJob?.cancel()

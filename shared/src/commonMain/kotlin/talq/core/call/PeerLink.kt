@@ -12,6 +12,9 @@ internal class PeerLink(val sid: String) {
     var userId: String = ""
     var name: String = ""
 
+    /** "person N" in the call log (names and ids stay out of it). */
+    var number: Int = 0
+
     /** Their call flags as last reported; [flagsKnown] = the signaling server said so (not a REST guess). */
     var flags: Int = 0
     var flagsKnown: Boolean = false

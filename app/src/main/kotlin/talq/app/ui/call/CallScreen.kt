@@ -392,7 +392,8 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
     val peerSends = peer?.let { it.audio || it.video } == true
     val downSince = receivingDownSince
     val cantHear = !call.isGroup && state is CallState.Active && peerSends &&
-        ((downSince != null && now - downSince > NOTHING_ARRIVES_MS) || (receiving == MediaConnection.Connected && peer?.audio == true && !hears))
+        ((downSince != null && now - downSince > if (receiving == MediaConnection.New) NOTHING_OFFERED_MS else NOTHING_ARRIVES_MS) ||
+            (receiving == MediaConnection.Connected && peer?.audio == true && !hears))
     val compact = landscape()
 
     Box(Modifier.fillMaxSize()) {
@@ -404,8 +405,14 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             val people = participants.size + 1
-            val line = stateLine(state, peer?.displayName ?: call.title, now, call.isGroup) +
-                if (call.isGroup && state is CallState.Active) " · $people people" else ""
+            // Answered, their sound or picture not here yet (about a second): said, not a running 0:00.
+            val connecting = !call.isGroup && state is CallState.Active && peerSends &&
+                receiving != MediaConnection.Connected && !cantHear
+            val line = when {
+                connecting -> if (call.incoming) "Connecting…" else "Answered · connecting…"
+                else -> stateLine(state, peer?.displayName ?: call.title, now, call.isGroup) +
+                    if (call.isGroup && state is CallState.Active) " · $people people" else ""
+            }
             if (staged) {
                 Spacer(Modifier.height(8.dp))
                 Text(call.title, style = MaterialTheme.typography.titleMedium, color = colors.textPrimary, maxLines = 1)
@@ -630,3 +637,6 @@ private fun VideoView(track: VideoTrack?, egl: WebRtcEngine, mirror: Boolean, fi
 private const val ENDED_SHOWN_MS = 2_000L
 private const val SETTINGS_SHOWN_MS = 6_000L
 private const val NOTHING_ARRIVES_MS = 5_000L
+
+/** Answered, their media not offered yet: a desktop callee needs 3-4 s to publish (measured 2026-11-28). */
+private const val NOTHING_OFFERED_MS = 12_000L

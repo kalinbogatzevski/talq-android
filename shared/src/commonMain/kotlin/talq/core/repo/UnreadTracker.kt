@@ -272,8 +272,12 @@ class UnreadTracker internal constructor(
         val cleared = batch.lastOrNull { it.systemMessage == "history_cleared" }?.id ?: 0L
         val marker = maxOf(marker(), cleared)
         val fresh = batch.filter { it.id > marker && countable(it) }.map { entry(it) }
-        if (fresh.isNotEmpty() || cleared > 0L) _state.update { s ->
+        // A topic's first post counted in no topic (it came before its topic was made, see ChatRepository.withBatch):
+        // the topic's notice says where it is. The topic id is the root's id.
+        val moved = batch.filter { it.isTopicCreatedNotice && it.topicId != 0L }.mapTo(HashSet()) { it.topicId }
+        if (fresh.isNotEmpty() || cleared > 0L || moved.isNotEmpty()) _state.update { s ->
             val held = s.entries.filter { it.id > cleared }
+                .map { e -> if (e.topicId == 0L && e.id in moved) e.copy(topicId = e.id) else e }
             val known = held.mapTo(HashSet()) { it.id }
             s.copy(entries = (held + fresh.filterNot { it.id in known }).sortedBy { it.id })
         }

@@ -1,0 +1,1 @@
+0.12.1: Calls start faster: the nearest signaling server where your server lists several, your sound offered while joining, and the ringing stops when they answer. The version is at the top of Settings and on the sign-in screen. Push turned off on the server is named as such. A topic someone else starts leaves General at once.

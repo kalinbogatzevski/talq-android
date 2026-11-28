@@ -61,9 +61,11 @@ class SavedChat private constructor(
         val whole = if (scope == ChatScope.All) null else views[ChatScope.All.key]
         val newer = whole?.ids.orEmpty().filter { id -> rows[id]?.let(scope::accepts) == true }
         val meets = own != null && whole != null && own.top >= whole.ids.first()
+        // A view's own ids too: a message kept there may have moved since (a topic's root, see ChatRepository.withBatch).
+        val ownIds = own?.ids.orEmpty().filter { id -> rows[id]?.let(scope::accepts) == true }
         val ids = when {
             own == null -> newer
-            newer.isEmpty() || meets -> (own.ids + newer).distinct().sorted()
+            newer.isEmpty() || meets -> (ownIds + newer).distinct().sorted()
             else -> newer
         }
         val messages = ids.mapNotNull { rows[it] }.mapNotNull { it.unexpired(nowSeconds) }

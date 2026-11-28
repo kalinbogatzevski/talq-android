@@ -241,6 +241,11 @@ fun RoomHostScreen(
             session.rooms.refresh()
         }
     }
+    // A call here starts without first asking for its settings: read them while the chat is in
+    // front (again each time it comes back, and when a call starts running here).
+    LaunchedEffect(session, token, canCall, inFront, joinable) {
+        if (canCall && inFront && session.checked) calls.prepare(token, connect = false)
+    }
 
     LifecycleStartEffect(vm) {
         vm.wholeChat.start()
@@ -413,10 +418,10 @@ fun RoomHostScreen(
     val canStartTopic = session.supportsTopics && room?.takesPosts(session.capabilities, System.currentTimeMillis() / 1000) != false
 
     // The next tab with something unread, going right from the open one and round the strip.
-    // Never the open tab, never a topic set to Never.
+    // Never the open tab; a topic set to Never only when it names the user (its chip's "@" stays red then).
     val nextUnread = remember(chips, shown) {
         val at = chips.indexOfFirst { it.tab == shown }
-        if (at < 0) null else (chips.drop(at + 1) + chips.take(at)).firstOrNull { it.unread.any && !it.muted }
+        if (at < 0) null else (chips.drop(at + 1) + chips.take(at)).firstOrNull { it.unread.any && (!it.muted || it.unread.direct) }
     }
 
     val scope = rememberCoroutineScope()

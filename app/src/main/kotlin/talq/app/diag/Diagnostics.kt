@@ -24,6 +24,7 @@ import talq.app.Brand
 import talq.app.BuildConfig
 import talq.app.fixedErp
 import talq.app.SessionState
+import talq.app.call.NearestHpb
 import talq.app.call.TurnProbe
 import talq.app.push.AlertState
 import talq.app.push.NotificationKind
@@ -37,6 +38,8 @@ import talq.core.TalkError
 import talq.core.call.HpbConnection
 import talq.core.call.HpbState
 import talq.core.call.IceServer
+import talq.core.call.hpbCandidates
+import talq.core.call.hpbHost
 import talq.core.net.newHpbHttpClient
 import talq.core.repo.TalkSession
 import java.net.Inet6Address
@@ -53,6 +56,8 @@ data class Check(
     val detail: String,
     val health: Health,
     val action: DiagAction? = null,
+    /** Written under the line in the shared report only (for whoever reads it there, not on screen). */
+    val reportNote: String? = null,
 )
 
 /** System pages a check can open. */
@@ -184,7 +189,12 @@ class Diagnostics(private val context: Context, private val container: AppContai
             PushStatus.Active -> Check(PUSH, "Push", "Active" + (route?.let { ", via $it" } ?: ""), Health.Good)
             PushStatus.Registering -> Check(PUSH, "Push", "Registering with the server…", Health.Running)
             PushStatus.NoDistributor -> Check(PUSH, "Push", "No way to receive push on this phone (no Google Play services, no push app)", Health.Bad)
-            PushStatus.ServerDisabled -> Check(PUSH, "Push", "The server does not send push (web push is off there)", Health.Bad)
+            // Only the server's admin can change it; a tester sends the report to whoever that is.
+            PushStatus.ServerDisabled -> Check(
+                PUSH, "Push", "Web push is off on the server: ask its admin to turn it on", Health.Bad,
+                reportNote = "Admin, on the server: sudo -u www-data php occ config:app:set notifications " +
+                    "webpush_enabled --value=1 --type=boolean   (then reopen TalQ)",
+            )
             PushStatus.Unknown -> Check(PUSH, "Push", "Not set up yet", Health.Warn)
             is PushStatus.Error -> Check(PUSH, "Push", s.message, Health.Bad)
         }
@@ -280,6 +290,10 @@ class Diagnostics(private val context: Context, private val container: AppContai
             return
         }
         put("calls", hpbCheck(session, settings))
+        if (hpbCandidates(settings).size > 1) {
+            put("nodes", Check(CALLS, "Signaling nodes", "Measuring…", Health.Running))
+            put("nodes", nodesCheck(settings))
+        }
         // One line per STUN/TURN address; TURN is what gets a call through a strict firewall.
         // A few at a time: one after another, 14 addresses could take a minute and a half.
         val urls = settings.iceServers.flatMap { server -> server.urls.map { server to it } }.distinctBy { it.second }.take(MAX_ICE_URLS)
@@ -307,6 +321,18 @@ class Diagnostics(private val context: Context, private val container: AppContai
             TurnProbe.Result.NoAnswer ->
                 Check(CALLS, name, if (turn) "No relay from this address" else "No answer", if (turn) Health.Bad else Health.Warn)
             is TurnProbe.Result.Failed -> Check(CALLS, name, "Could not test (${r.reason})", Health.Warn)
+        }
+    }
+
+    /** Which of the server's signaling nodes a call would use from here, and how far each is. */
+    private suspend fun nodesCheck(settings: talq.core.call.SignalingSettings): Check {
+        val (reading, skipped) = container.calls.nodes.measure(settings)
+        val named = hostOf(settings.server)
+        return when {
+            skipped == NearestHpb.Skipped.Proxy -> Check(CALLS, "Signaling nodes", "Not measured behind a proxy: calls use $named", Health.Info)
+            reading == null -> Check(CALLS, "Signaling nodes", "Not measured: no network", Health.Warn)
+            reading.pick.index < 0 -> Check(CALLS, "Signaling nodes", "None answered, calls use $named · ${reading.line()}", Health.Warn)
+            else -> Check(CALLS, "Signaling nodes", "Calls use ${hpbHost(reading.chosen)} · ${reading.line()}", Health.Good)
         }
     }
 

@@ -115,6 +115,16 @@ data class SignalingSettings(
             "iceServers=$iceServers, fetchedAtMillis=$fetchedAtMillis)"
 }
 
+/**
+ * Signaling made ready before a call starts, so that starting it does not wait for it: the
+ * [settings] (read while the conversation was open or the call rang) and, while a call rang, a
+ * [connection] that has said hello already (none otherwise). A call given one owns it from then
+ * on and closes it when it ends.
+ */
+class PreparedSignaling(val settings: SignalingSettings, val connection: HpbConnection? = null) {
+    override fun toString(): String = "PreparedSignaling(settings=$settings, connection=${connection != null})"
+}
+
 /** One row of `GET call/{token}`: someone in the call, with their Nextcloud session id. */
 data class CallPeer(
     val actorType: String,
