@@ -39,13 +39,19 @@ fun hpbWebSocketUrl(server: String): String {
     return "$s/spreed"
 }
 
-/** Someone in the room as a `participants` update lists them. [sessionId] is their HPB session. */
+/**
+ * Someone in the room as a `participants` update lists them. [sessionId] is their HPB session;
+ * [permissions] their attendee permissions (0 = not sent); [internal] = a session the signaling
+ * server added itself (the SIP bridge, a phone participant), which publishes no media of its own.
+ */
 data class HpbUser(
     val sessionId: String,
     val inCall: Int,
     val userId: String,
     val ncSessionId: String,
     val displayName: String = "",
+    val permissions: Int = 0,
+    val internal: Boolean = false,
 )
 
 /** One session that joined the room: its HPB session, user id, Nextcloud room session and the person's name. */
@@ -171,6 +177,8 @@ private fun hpbUsers(update: JsonObject?, key: String): List<HpbUser> =
             userId = u.str("userId").ifEmpty { u.str("actorId") },
             ncSessionId = u.str("nextcloudSessionId"),
             displayName = u.str("displayName"),
+            permissions = u.int("participantPermissions"),
+            internal = u.bool("internal") || u.bool("virtual"),
         )
     } ?: emptyList()
 
@@ -185,6 +193,19 @@ private fun message(m: JsonObject?): HpbInbound {
         payload = data.obj("payload") ?: EmptyJsonObject,
         senderUserId = m.obj("sender")?.str("userid") ?: "",
     )
+}
+
+/** Longer than any status message a client sends on its data channel. */
+private const val MAX_STATUS_CHARS = 4096
+
+/**
+ * The `type` of a status message another person's client sent on its data channel (audioOn,
+ * speaking, ...). Anybody in the call writes these: null for anything too long, too deep, not an
+ * object or without a type.
+ */
+fun parseRemoteStatus(text: String): String? {
+    if (text.length > MAX_STATUS_CHARS) return null
+    return objectIn(text)?.str("type")?.takeIf { it.isNotEmpty() && it.length <= 64 }
 }
 
 /** `data` is an object; some senders put it in as JSON text instead. */

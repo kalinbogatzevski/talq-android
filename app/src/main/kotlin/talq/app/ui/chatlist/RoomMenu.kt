@@ -1,5 +1,6 @@
 package talq.app.ui.chatlist
 
+import talq.core.call.callOffered
 import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -148,7 +149,7 @@ fun RoomMenuHost(state: RoomMenuState, session: TalkSession, rooms: List<Room>, 
             LaunchedEffect(token) { state.menuFor = null }
         } else {
             key(token) {
-                val canCall = remember { callsAvailable && room.isOneToOne && !room.isReadOnly && room.canStartCall && !calls.busy }
+                val canCall = remember { callOffered(room, callsAvailable, System.currentTimeMillis() / 1000) && !calls.busy }
                 RoomMenuSheet(
                     session = session,
                     room = room,

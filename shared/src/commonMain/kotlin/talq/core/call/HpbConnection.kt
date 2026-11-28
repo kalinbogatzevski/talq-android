@@ -274,8 +274,10 @@ class HpbConnection(
             }
             failures++
             val since = droppedAt ?: TimeSource.Monotonic.markNow().also { droppedAt = it }
-            // The server keeps a dropped session about 30 s: keep resuming it, every second, for
-            // 25 s (a network switch takes a few seconds); after that start a new session.
+            // The server notices a dead socket only when its pings go unanswered (up to a minute)
+            // and keeps the session about 30 s after that: keep resuming it, every second, for
+            // 45 s, the call's reconnect window. A refused resume starts a new session on the
+            // same socket at once, so trying longer costs nothing; after that, new sessions.
             if (resumeId != null && since.elapsedNow().inWholeMilliseconds >= RESUME_WINDOW_MS) {
                 resumeId = null
                 failures = 1
@@ -375,7 +377,7 @@ class HpbConnection(
         const val BYE_TIMEOUT_MS = 2_000L
         const val RESUME_DELAY_MS = 250L
         const val RESUME_RETRY_MS = 1_000L
-        const val RESUME_WINDOW_MS = 25_000L
+        const val RESUME_WINDOW_MS = 45_000L
 
         /** 2 s, 4 s, 8 s ... up to 60 s. */
         fun backoffMillis(failures: Int): Long {

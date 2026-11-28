@@ -36,10 +36,16 @@ import org.webrtc.VideoFrame
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
+import kotlinx.coroutines.flow.update
 import talq.core.call.IceServer
 import talq.core.call.LocalCandidate
 import talq.core.call.MediaConnection
 import talq.core.call.MediaEngine
+import talq.core.call.PublishRights
+import talq.core.call.RemoteStatus
+import talq.core.call.StreamKind
+import talq.core.call.SubscriberKey
+import talq.core.call.parseRemoteStatus
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -55,12 +61,18 @@ import kotlin.coroutines.resumeWithException
  * media server, so there are two kinds of connection:
  *
  * - the PUBLISHER: what we send. Unified plan, max-bundle, rtcp-mux, no ICE over TCP (the media
- *   server has it off; TURN over TCP/TLS still works). Send-only audio and ALWAYS a send-only
- *   video section, whether the camera is on or not: other TalQ clients only take a stream that
- *   has video. A data channel "status" carries audioOn/audioOff/videoOn/videoOff. Video codecs
- *   are offered as H264 Constrained Baseline first, then VP8 (desktop decodes only those two).
- *   The SDP is never edited.
- * - one SUBSCRIBER: what we receive from the other person, built from the media server's offer.
+ *   server has it off; TURN over TCP/TLS still works). A send-only audio section where audio is
+ *   allowed, and a send-only video section where video is allowed, whether the camera is on or
+ *   not (TalQ for desktop before 0.83 only took a stream that has video; the signaling server
+ *   refuses a video section without the video permission). A data channel "status" carries
+ *   audioOn/audioOff/videoOn/videoOff and speaking/stoppedSpeaking. Video codecs are offered as
+ *   H264 Constrained Baseline first, then VP8 (desktop decodes only those two). The SDP is never
+ *   edited.
+ * - one SUBSCRIBER per [SubscriberKey]: what we receive from one person's camera and microphone,
+ *   or from a screen they share, built from the media server's offer. Each subscriber's data
+ *   channel brings that person's status messages ([remoteStatus]); every 500 ms the received audio
+ *   level adds speaking / stoppedSpeaking for clients that do not send them, and our own level
+ *   sends ours.
  *
  * The camera (front first, 1280x720 at 30 fps where it can, else 640x480) runs only while it
  * is switched on; switching it off stops the device. While it is off, black frames go out for
@@ -90,14 +102,14 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
     /** Our camera picture (also while it is off: then it carries nothing). For the preview. */
     val localVideo: VideoTrack
 
-    private val _remoteVideo = MutableStateFlow<VideoTrack?>(null)
+    private val _remoteVideos = MutableStateFlow<Map<SubscriberKey, VideoTrack>>(emptyMap())
 
-    /** The other person's video track while a subscriber has one. */
-    val remoteVideo: StateFlow<VideoTrack?> = _remoteVideo.asStateFlow()
+    /** The video track of every subscriber that has one (a camera, or a shared screen). */
+    val remoteVideos: StateFlow<Map<SubscriberKey, VideoTrack>> = _remoteVideos.asStateFlow()
 
     private val _audioArrives = MutableStateFlow(true)
 
-    /** False when the subscriber is connected but no audio packet came in the last 5 s. */
+    /** False when camera subscribers are connected but no audio packet came from any in the last 5 s. */
     val audioArrives: StateFlow<Boolean> = _audioArrives.asStateFlow()
 
     private val _frontCamera = MutableStateFlow(true)
@@ -121,24 +133,38 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
     private val _publisher = MutableStateFlow(MediaConnection.New)
     override val publisher: StateFlow<MediaConnection> = _publisher.asStateFlow()
 
-    private val _subscriber = MutableStateFlow(MediaConnection.New)
-    override val subscriber: StateFlow<MediaConnection> = _subscriber.asStateFlow()
+    private val _subscribers = MutableStateFlow<Map<SubscriberKey, MediaConnection>>(emptyMap())
+    override val subscribers: StateFlow<Map<SubscriberKey, MediaConnection>> = _subscribers.asStateFlow()
+
+    private val statusIn = Channel<RemoteStatus>(Channel.UNLIMITED)
+    override val remoteStatus: Flow<RemoteStatus> = statusIn.receiveAsFlow()
+
+    /** One subscriber: its connection, data channel and audio track; [remoteSet] / [pending] under lock. */
+    private class Sub(val key: SubscriberKey, val pc: PeerConnection) {
+        @Volatile var channel: DataChannel? = null
+        @Volatile var audio: AudioTrack? = null
+        var remoteSet = false
+        val pending = ArrayList<IceCandidate>()
+
+        // Worker thread only: the statistics.
+        var lastPackets = -1L
+        var lastGrowth = 0L
+        var speaking = false
+    }
 
     // Written under lock; read anywhere (volatile), in particular by the callbacks.
     @Volatile private var closed = false
     @Volatile private var pub: PeerConnection? = null
     @Volatile private var pubChannel: DataChannel? = null
-    @Volatile private var sub: PeerConnection? = null
-    @Volatile private var subPeer: String? = null
-    @Volatile private var remoteAudio: AudioTrack? = null
-    @Volatile private var subChannel: DataChannel? = null
+    @Volatile private var pubHasVideo = false
+
+    /** Every subscriber; replaced as a whole under lock, so the callbacks read it without the lock. */
+    @Volatile private var subs: Map<SubscriberKey, Sub> = emptyMap()
     @Volatile private var playRemote = true
 
     // Under lock.
     private var pubRemoteSet = false
     private val pubPending = ArrayList<IceCandidate>()
-    private var subRemoteSet = false
-    private val subPending = ArrayList<IceCandidate>()
 
     // Worker thread only.
     private var capturer: CameraVideoCapturer? = null
@@ -150,8 +176,7 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
     private var black: ScheduledFuture<*>? = null
     private var blackBuffer: JavaI420Buffer? = null
     private var stats: ScheduledFuture<*>? = null
-    private var lastAudioPackets = -1L
-    private var lastAudioGrowth = 0L
+    private var localSpeaking = false
 
     init {
         initialize(appContext)
@@ -200,10 +225,10 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
 
     // ---------------------------------------------------------------- publisher
 
-    override suspend fun createPublisherOffer(iceServers: List<IceServer>, video: Boolean): String {
+    override suspend fun createPublisherOffer(iceServers: List<IceServer>, rights: PublishRights, video: Boolean): String {
         check(!closed) { "media closed" }
         // Built outside the lock: creating a connection waits for libwebrtc's signaling thread.
-        val observer = Observer(peer = null)
+        val observer = Observer(key = null)
         val pc = factory.createPeerConnection(rtcConfig(iceServers), observer)
             ?: throw IllegalStateException("no peer connection")
         observer.pc = pc
@@ -219,17 +244,22 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
             _publisher.value = MediaConnection.New
             pub = pc
             pubChannel = null
+            pubHasVideo = rights.video
             pubRemoteSet = false
             pubPending.clear()
         }
         retire(old, oldChannel, delayMs = 0)
         val streams = listOf(STREAM_ID)
-        pc.addTransceiver(audioTrack, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, streams))
-        val videoTransceiver = pc.addTransceiver(
-            localVideo,
-            RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, streams),
-        )
-        preferVideoCodecs(videoTransceiver)
+        if (rights.audio) {
+            pc.addTransceiver(audioTrack, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, streams))
+        }
+        if (rights.video) {
+            val videoTransceiver = pc.addTransceiver(
+                localVideo,
+                RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, streams),
+            )
+            preferVideoCodecs(videoTransceiver)
+        }
         val channel = pc.createDataChannel("status", DataChannel.Init())
         synchronized(lock) { if (pub === pc) pubChannel = channel }
         val offer = pc.awaitCreate(offer = true)
@@ -248,39 +278,54 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         pending.forEach { pc.addIceCandidate(it) }
     }
 
+    override fun closePublisher() {
+        val old: PeerConnection?
+        val oldChannel: DataChannel?
+        synchronized(lock) {
+            old = pub
+            oldChannel = pubChannel
+            pub = null
+            pubChannel = null
+            pubHasVideo = false
+            pubRemoteSet = false
+            pubPending.clear()
+            _publisher.value = MediaConnection.New
+        }
+        runCatching { audioTrack.setEnabled(false) }
+        onWorker {
+            stopBlack()
+            localSpeaking = false
+        }
+        retire(old, oldChannel, delayMs = 0)
+    }
+
     // ---------------------------------------------------------------- subscriber
 
-    override suspend fun answerSubscriber(peerSessionId: String, offerSdp: String, iceServers: List<IceServer>): String {
+    override suspend fun answerSubscriber(key: SubscriberKey, offerSdp: String, iceServers: List<IceServer>): String {
         check(!closed) { "media closed" }
-        val observer = Observer(peer = peerSessionId)
+        val observer = Observer(key)
         val pc = factory.createPeerConnection(rtcConfig(iceServers), observer)
             ?: throw IllegalStateException("no peer connection")
         observer.pc = pc
-        val old: PeerConnection?
-        val oldSubChannel: DataChannel?
+        val sub = Sub(key, pc)
+        val old: Sub?
         synchronized(lock) {
             if (closed) {
                 onWorker { runCatching { pc.dispose() } }
                 throw IllegalStateException("media closed")
             }
-            old = sub
-            oldSubChannel = subChannel
-            subChannel = null
-            _remoteVideo.value = null
-            remoteAudio = null
-            _subscriber.value = MediaConnection.New
-            sub = pc
-            subPeer = peerSessionId
-            subRemoteSet = false
-            subPending.clear()
+            old = subs[key]
+            subs = subs + (key to sub)
+            _remoteVideos.update { it - key }
+            _subscribers.update { it + (key to MediaConnection.New) }
         }
         // Later than a publisher: the call screen first lets go of the old video track.
-        retire(old, oldSubChannel, delayMs = DISPOSE_DELAY_MS)
+        old?.let { retire(it.pc, it.channel, delayMs = DISPOSE_DELAY_MS) }
         pc.awaitSetRemote(SessionDescription(SessionDescription.Type.OFFER, offerSdp))
         val pending = synchronized(lock) {
-            if (sub !== pc) emptyList() else {
-                subRemoteSet = true
-                subPending.toList().also { subPending.clear() }
+            if (subs[key] !== sub) emptyList() else {
+                sub.remoteSet = true
+                sub.pending.toList().also { sub.pending.clear() }
             }
         }
         pending.forEach { pc.addIceCandidate(it) }
@@ -289,11 +334,23 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         return answer.description
     }
 
-    override fun addRemoteCandidate(peerSessionId: String?, candidate: String, sdpMid: String?, sdpMLineIndex: Int) {
+    override fun closeSubscriber(key: SubscriberKey) {
+        val old = synchronized(lock) {
+            val s = subs[key] ?: return
+            subs = subs - key
+            _remoteVideos.update { it - key }
+            _subscribers.update { it - key }
+            s
+        }
+        runCatching { old.audio?.setEnabled(false) }
+        retire(old.pc, old.channel, delayMs = DISPOSE_DELAY_MS)
+    }
+
+    override fun addRemoteCandidate(key: SubscriberKey?, candidate: String, sdpMid: String?, sdpMLineIndex: Int) {
         val ice = IceCandidate(sdpMid ?: "", sdpMLineIndex, candidate)
         // Decided under the lock, added after it (adding waits for libwebrtc's thread).
         val target: PeerConnection? = synchronized(lock) {
-            if (peerSessionId == null) {
+            if (key == null) {
                 val pc = pub
                 when {
                     pc == null -> null
@@ -304,12 +361,12 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
                     }
                 }
             } else {
-                val pc = sub
+                val s = subs[key]
                 when {
-                    peerSessionId != subPeer || pc == null -> null
-                    subRemoteSet -> pc
+                    s == null -> null
+                    s.remoteSet -> s.pc
                     else -> {
-                        if (subPending.size < MAX_PENDING) subPending += ice
+                        if (s.pending.size < MAX_PENDING) s.pending += ice
                         null
                     }
                 }
@@ -324,10 +381,10 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         audioTrack.setEnabled(enabled)
     }
 
-    /** Plays (true) or silences (false) what the other person sends, e.g. while on hold. */
+    /** Plays (true) or silences (false) what everyone else sends, e.g. while on hold. */
     fun setRemoteAudio(enabled: Boolean) {
         playRemote = enabled
-        runCatching { remoteAudio?.setEnabled(enabled) }
+        for (s in subs.values) runCatching { s.audio?.setEnabled(enabled) }
     }
 
     /** Coalesced: only the last state 250 ms after the last switch reaches the camera. */
@@ -478,29 +535,71 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
 
     // ---------------------------------------------------------------- statistics
 
-    /** Worker thread. Every 2 s while a subscriber is connected: did audio packets come in? */
+    /**
+     * Worker thread. Every 500 ms once a connection is up: for each camera subscriber, did audio
+     * packets come in, and is that person speaking (received level above 0.20)? And for our own
+     * microphone, while it is on: are we speaking (level above 0.05)? Speaking changes go out as
+     * status messages, as TalQ for desktop sends and reads them.
+     */
     private fun startStats() {
-        stats?.cancel(false)
-        lastAudioPackets = -1L
-        lastAudioGrowth = SystemClock.elapsedRealtime()
-        _audioArrives.value = true
+        if (stats != null) return
         stats = worker.scheduleWithFixedDelay({
-            val pc = sub ?: return@scheduleWithFixedDelay
-            pc.getStats { report ->
-                var packets = 0L
-                for (s in report.statsMap.values) {
-                    if (s.type == "inbound-rtp" && s.members["kind"] == "audio") {
-                        packets += (s.members["packetsReceived"] as? Number)?.toLong() ?: 0L
+            for (s in subs.values) {
+                if (s.key.kind != StreamKind.Camera) continue
+                s.pc.getStats { report ->
+                    var packets = 0L
+                    var level = 0.0
+                    for (st in report.statsMap.values) {
+                        if (st.type == "inbound-rtp" && st.members["kind"] == "audio") {
+                            packets += (st.members["packetsReceived"] as? Number)?.toLong() ?: 0L
+                            level = maxOf(level, (st.members["audioLevel"] as? Number)?.toDouble() ?: 0.0)
+                        }
                     }
-                }
-                onWorker {
-                    val now = SystemClock.elapsedRealtime()
-                    if (packets > lastAudioPackets) lastAudioGrowth = now
-                    lastAudioPackets = packets
-                    _audioArrives.value = now - lastAudioGrowth < AUDIO_SILENCE_MS
+                    onWorker { subStats(s, packets, level) }
                 }
             }
+            val p = pub
+            if (p != null) {
+                p.getStats { report ->
+                    var level = 0.0
+                    for (st in report.statsMap.values) {
+                        if (st.type == "media-source" && st.members["kind"] == "audio") {
+                            level = maxOf(level, (st.members["audioLevel"] as? Number)?.toDouble() ?: 0.0)
+                        }
+                    }
+                    onWorker { ownStats(level) }
+                }
+            }
+            refreshAudioArrives()
         }, STATS_MS, STATS_MS, TimeUnit.MILLISECONDS)
+    }
+
+    /** Worker thread. */
+    private fun subStats(s: Sub, packets: Long, level: Double) {
+        if (subs[s.key] !== s) return
+        val now = SystemClock.elapsedRealtime()
+        if (s.lastPackets < 0 || packets > s.lastPackets) s.lastGrowth = now
+        s.lastPackets = packets
+        val speaking = level > REMOTE_SPEAKING_LEVEL
+        if (speaking != s.speaking) {
+            s.speaking = speaking
+            statusIn.trySend(RemoteStatus(s.key.sid, if (speaking) "speaking" else "stoppedSpeaking"))
+        }
+    }
+
+    /** Worker thread. */
+    private fun ownStats(level: Double) {
+        val speaking = audioTrack.enabled() && level > OWN_SPEAKING_LEVEL
+        if (speaking == localSpeaking) return
+        localSpeaking = speaking
+        sendStatus(if (speaking) "speaking" else "stoppedSpeaking")
+    }
+
+    /** Worker thread. Audio "arrives" unless connected camera subscribers all went quiet for 5 s. */
+    private fun refreshAudioArrives() {
+        val now = SystemClock.elapsedRealtime()
+        val connected = subs.values.filter { it.key.kind == StreamKind.Camera && _subscribers.value[it.key] == MediaConnection.Connected }
+        _audioArrives.value = connected.isEmpty() || connected.any { it.lastPackets < 0 || now - it.lastGrowth < AUDIO_SILENCE_MS }
     }
 
     private fun stopStats() {
@@ -514,48 +613,44 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
     override fun rebuild() {
         val oldPub: PeerConnection?
         val oldChannel: DataChannel?
-        val oldSub: PeerConnection?
-        val oldSubChannel: DataChannel?
+        val oldSubs: Collection<Sub>
         synchronized(lock) {
-            _remoteVideo.value = null
-            remoteAudio = null
+            _remoteVideos.value = emptyMap()
             oldPub = pub
             oldChannel = pubChannel
-            oldSub = sub
-            oldSubChannel = subChannel
+            oldSubs = subs.values
             pub = null
-            sub = null
-            subPeer = null
+            subs = emptyMap()
             pubChannel = null
-            subChannel = null
             pubPending.clear()
-            subPending.clear()
             _publisher.value = MediaConnection.New
-            _subscriber.value = MediaConnection.New
+            _subscribers.value = emptyMap()
         }
         retire(oldPub, oldChannel, delayMs = 0)
-        retire(oldSub, oldSubChannel, delayMs = DISPOSE_DELAY_MS)
+        for (s in oldSubs) {
+            runCatching { s.audio?.setEnabled(false) }
+            retire(s.pc, s.channel, delayMs = DISPOSE_DELAY_MS)
+        }
     }
 
     override fun close() {
         val oldPub: PeerConnection?
         val oldChannel: DataChannel?
-        val oldSub: PeerConnection?
-        val oldSubChannel: DataChannel?
+        val oldSubs: Collection<Sub>
         synchronized(lock) {
             if (closed) return
             closed = true
-            _remoteVideo.value = null
+            _remoteVideos.value = emptyMap()
             oldPub = pub
             oldChannel = pubChannel
-            oldSub = sub
-            oldSubChannel = subChannel
+            oldSubs = subs.values
             pub = null
-            sub = null
+            subs = emptyMap()
             pubChannel = null
-            subChannel = null
         }
         candidates.close()
+        statusIn.close()
+        for (s in oldSubs) runCatching { s.audio?.setEnabled(false) }
         // Silent and dark at once; the objects themselves go a moment later.
         runCatching { audioTrack.setEnabled(false) }
         setRemoteAudio(false)
@@ -571,10 +666,12 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
                 stopStats()
                 stopBlack()
                 runCatching { oldChannel?.dispose() }
-                runCatching { oldSubChannel?.dispose() }
                 runCatching { oldPub?.dispose() }
-                runCatching { oldSub?.dispose() }
-                remoteAudio = null
+                for (s in oldSubs) {
+                    runCatching { s.channel?.dispose() }
+                    runCatching { s.pc.dispose() }
+                    s.audio = null
+                }
                 stopCamera()
                 // The camera stops on its own thread: wait for that before its thread goes.
                 captureHelper?.let { h ->
@@ -601,7 +698,7 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         }
         worker.shutdown()
         _publisher.value = MediaConnection.New
-        _subscriber.value = MediaConnection.New
+        _subscribers.value = emptyMap()
     }
 
     /** Runs [block] on the worker thread; after [close] (a late tap, a late callback) it is dropped. */
@@ -618,7 +715,7 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         if (pc == null) return
         try {
             worker.schedule({
-                if (pc === sub) return@schedule
+                if (pc === pub || subs.values.any { it.pc === pc }) return@schedule
                 runCatching { channel?.dispose() }
                 runCatching { pc.dispose() }
             }, delayMs, TimeUnit.MILLISECONDS)
@@ -665,23 +762,34 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         Log.i(TAG, "video codecs offered: h264=${h264.size} vp8=${vp8.size}")
     }
 
-    /** Callbacks on libwebrtc's signaling thread: they read volatile fields only, never [lock]. */
-    private inner class Observer(private val peer: String?) : PeerConnection.Observer {
+    /**
+     * Callbacks on libwebrtc's signaling thread: they read volatile fields only, never [lock].
+     * [key] null = the publisher.
+     */
+    private inner class Observer(private val key: SubscriberKey?) : PeerConnection.Observer {
         @Volatile var pc: PeerConnection? = null
+
+        private fun sub(): Sub? {
+            val p = pc ?: return null
+            val k = key ?: return null
+            return subs[k]?.takeIf { it.pc === p }
+        }
 
         private fun current(): Boolean {
             val p = pc ?: return false
-            return if (peer == null) pub === p else sub === p
+            return if (key == null) pub === p else sub() != null
         }
+
+        private val kind: StreamKind get() = key?.kind ?: StreamKind.Camera
 
         override fun onIceCandidate(candidate: IceCandidate) {
             if (!current()) return
-            candidates.trySend(LocalCandidate.Candidate(peer, candidate.sdp, candidate.sdpMid, candidate.sdpMLineIndex))
+            candidates.trySend(LocalCandidate.Candidate(key?.sid, candidate.sdp, candidate.sdpMid, candidate.sdpMLineIndex, kind))
         }
 
         override fun onIceGatheringChange(newState: PeerConnection.IceGatheringState) {
             if (newState == PeerConnection.IceGatheringState.COMPLETE && current()) {
-                candidates.trySend(LocalCandidate.End(peer))
+                candidates.trySend(LocalCandidate.End(key?.sid, kind))
             }
         }
 
@@ -695,16 +803,17 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
                 PeerConnection.PeerConnectionState.DISCONNECTED -> MediaConnection.Connecting
                 else -> MediaConnection.Failed
             }
-            Log.i(TAG, "${if (peer == null) "sending" else "receiving"}: $newState")
-            if (peer == null) {
+            Log.i(TAG, "${if (key == null) "sending" else "receiving ${key.kind}"}: $newState")
+            if (key == null) {
                 _publisher.value = c
                 // The video section carries something at once, even with the camera off.
                 if (c == MediaConnection.Connected) onWorker {
-                    if (!cameraWanted) startBlack()
+                    if (!cameraWanted && pubHasVideo) startBlack()
                     sendHello()
+                    startStats()
                 }
             } else {
-                _subscriber.value = c
+                _subscribers.update { if (key in it) it + (key to c) else it }
                 // Again once the other side's stream is up: it may have missed the first one (desktop does the same).
                 if (c == MediaConnection.Connected) onWorker {
                     startStats()
@@ -714,11 +823,11 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         }
 
         override fun onTrack(transceiver: RtpTransceiver) {
-            if (peer == null || !current()) return
+            val s = sub() ?: return
             when (val track = transceiver.receiver.track()) {
-                is VideoTrack -> _remoteVideo.value = track
+                is VideoTrack -> _remoteVideos.update { if (subs[s.key] === s) it + (s.key to track) else it }
                 is AudioTrack -> {
-                    remoteAudio = track
+                    s.audio = track
                     runCatching { track.setEnabled(playRemote) }
                 }
                 else -> Unit
@@ -731,12 +840,35 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
         override fun onAddStream(stream: MediaStream) {}
         override fun onRemoveStream(stream: MediaStream) {}
-        // The media server may open one towards us; it is kept only to be disposed with its connection.
+        // The media server opens one towards us: that person's status messages (camera subscribers only).
         override fun onDataChannel(dataChannel: DataChannel) {
-            if (peer != null && current()) subChannel = dataChannel
+            val s = sub() ?: return
+            s.channel = dataChannel
+            if (s.key.kind == StreamKind.Camera) dataChannel.registerObserver(StatusObserver(s))
         }
         override fun onRenegotiationNeeded() {}
         override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {}
+    }
+
+    /**
+     * One person's status messages on their camera subscriber's data channel (libwebrtc's network
+     * thread): text only, 4 KiB at most, read through [parseRemoteStatus] (anybody in the call
+     * writes these).
+     */
+    private inner class StatusObserver(private val s: Sub) : DataChannel.Observer {
+        override fun onBufferedAmountChange(previousAmount: Long) {}
+        override fun onStateChange() {}
+
+        override fun onMessage(buffer: DataChannel.Buffer) {
+            if (buffer.binary || subs[s.key] !== s) return
+            val data = buffer.data
+            val size = data.remaining()
+            if (size <= 0 || size > MAX_STATUS_BYTES) return
+            val bytes = ByteArray(size)
+            data.get(bytes)
+            val type = parseRemoteStatus(bytes.decodeToString()) ?: return
+            statusIn.trySend(RemoteStatus(s.key.sid, type))
+        }
     }
 
     /** The camera stopped by itself (it failed, or another app took it): say so, send black. */
@@ -775,8 +907,13 @@ class WebRtcEngine(context: Context, val eglBase: EglBase, video: Boolean) : Med
         private const val STREAM_ID = "talq"
         private const val CAMERA_COALESCE_MS = 250L
         private const val BLACK_GRACE_MS = 5_000L
-        private const val STATS_MS = 2_000L
+        private const val STATS_MS = 500L
         private const val AUDIO_SILENCE_MS = 5_000L
+
+        /** TalQ for desktop's speaking thresholds (`CallParticipant.h`, `CallManager.cpp`). */
+        private const val REMOTE_SPEAKING_LEVEL = 0.20
+        private const val OWN_SPEAKING_LEVEL = 0.05
+        private const val MAX_STATUS_BYTES = 4096
         private const val MAX_PENDING = 64
         private const val CLOSE_WAIT_S = 6L
         private const val DISPOSE_DELAY_MS = 500L

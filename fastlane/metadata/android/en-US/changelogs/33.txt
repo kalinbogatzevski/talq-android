@@ -1,0 +1,1 @@
+0.12.0: Group calls: call buttons and a Join bar in group conversations, group calls ring, a tile for everyone with mic and speaking marks, shared screens with zoom (also in one-to-one calls), leaving ends nothing for the others, audio only where video is not allowed, a ringing tone while you call. The invite code field writes capitals and dashes as you type.

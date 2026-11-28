@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.12.0
+
+- **Group calls**: group and public conversations have the call buttons too. A call that runs in a
+  conversation shows "Call in progress" with Join under its top bar.
+- **A group call rings** like a one-to-one call, with the conversation's name and picture. Not answered,
+  it waits as a quiet "Group call in progress" notification with Join while the call runs. Conversations
+  with call notifications off do not ring.
+- **Everyone in the call**: with two or more other people, each has a tile with their camera or picture,
+  their name, a mark when their microphone is off and a frame while they speak. The phone asks for each
+  camera only in the quality its tile needs.
+- **Shared screens**: a screen someone shares fills the top of the call, in group and one-to-one calls.
+  Pinch to zoom and drag; double tap shows the whole screen again; turned sideways, the screen gets the
+  whole display. Several shares at once: chips switch between them.
+- **Leaving is leaving**: someone leaving a group call removes only their tile; the red button says Leave.
+  Nobody else in the call for a minute ends it.
+- **Only what the conversation allows**: where you may not send video (or anything), the phone sends
+  audio only, or listens, and says so in one line.
+- **Ringing while you call**: an outgoing call plays a ringing tone until someone answers.
+- **Calls ride out a lost network**: a call now comes back after up to about 30 s without any network
+  (it ended after 20 s of "Reconnecting…" before).
+- **Invite code field**: what you type or paste turns into capitals with the code's dashes in place
+  (`XXXX-XXXX-XXXX-XXXX-X`); the caret stays where you are, and deleting a dash deletes the character before it.
+
 ## 0.11.0
 
 - **Use with an organisation**: the sign-in screen has one more button. An organisation's invite code sets the

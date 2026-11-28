@@ -3,7 +3,7 @@
 TalQ for Android is a client for **your own Nextcloud server**. Its developer runs no server
 for it and collects nothing: no analytics, no advertising, no trackers, no crash reports.
 
-This text is about version 0.11.0.
+This text is about version 0.12.0.
 
 ## What stays on the phone
 
@@ -118,7 +118,9 @@ leave the phone; the rest is kept as it is.
 - **Calls**: the call is set up through your Nextcloud server and its call backend (the
   signaling server and media server your Nextcloud is configured with). Your voice and, when
   the camera is on, your video go encrypted (DTLS-SRTP) to that media server, which passes them
-  to the other person; where a direct path is blocked they go through the TURN relay servers
+  to the others in the call (in a group call, everyone in it); so does whether your microphone and
+  camera are on and, while you talk, that you are speaking (worked out on the phone from your
+  microphone's level; no sound is kept). Where a direct path is blocked they go through the TURN relay servers
   your Nextcloud names. To find a path, your phone's local and public internet addresses go to the call
   backend and to those servers. If your Nextcloud names no STUN server, the app uses Nextcloud's public
   one, `stun.nextcloud.com`, which then sees your phone's public internet address. The app keeps no recording and no call history of its own; where your server

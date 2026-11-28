@@ -1,5 +1,7 @@
 package talq.app.ui.room
 
+import talq.core.call.PublishRights
+import talq.core.call.callOffered
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SnackbarDuration
@@ -211,10 +213,20 @@ fun RoomHostScreen(
     val shifts by context.appContainer.shift.statuses.collectAsStateWithLifecycle()
     val shift = direct?.let { shifts[it.partnerUserId] }
     val typists = rememberTypists(session, token)
-    // Calls: one-to-one conversations on a server with a call backend.
+    // Calls: one-to-one, group and public conversations on a server with a call backend.
     val calls = context.appContainer.calls
     val callsAvailable by produceState(false, session) { value = calls.available(session) }
-    val canCall = direct != null && !readOnly && callsAvailable
+    val canCall = room != null && callOffered(room, callsAvailable, System.currentTimeMillis() / 1000)
+    val currentCall by calls.current.collectAsStateWithLifecycle()
+    // A call runs here that the user is not in (on this phone): the Join bar.
+    val joinable = canCall && room?.hasCall == true && currentCall?.token != token
+    // The list's hasCall changes with the room's call messages: reload the list when one comes.
+    val newestCallNotice = remember(whole.messages) {
+        whole.messages.lastOrNull { it.systemMessage in CALL_NOTICES }?.id ?: 0L
+    }
+    LaunchedEffect(session, newestCallNotice) {
+        if (newestCallNotice != 0L) session.rooms.refresh()
+    }
     // Presence comes with the conversation list, which nobody reloads while a chat is open
     // (apart from a push): reload it now and then while this one is in front.
     var inFront by remember { mutableStateOf(false) }
@@ -684,6 +696,16 @@ fun RoomHostScreen(
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
+            if (joinable) {
+                JoinCallBar(
+                    onJoin = { video ->
+                        context.startActivity(
+                            if (calls.busy) CallActivity.showIntent(context) else CallActivity.joinIntent(context, token, video),
+                        )
+                    },
+                    videoAllowed = room?.let { PublishRights.of(it.permissions).video } ?: true,
+                )
+            }
             if (stripTab != null) {
                 TopicStrip(
                     // A room that has no topics yet shows the one being started, and General, the way back to the chat.
@@ -895,3 +917,6 @@ fun RoomHostScreen(
         )
     }
 }
+
+/** The system messages that change whether a conversation has a call running. */
+private val CALL_NOTICES = setOf("call_started", "call_joined", "call_left", "call_ended", "call_ended_everyone", "call_missed")

@@ -46,7 +46,7 @@ class TalqCallService : Service() {
         // Always to the foreground first, whatever follows.
         val call = appContainer.calls.current.value?.takeIf { it.session.state.value !is CallState.Ended }
         val shown = if (call != null) {
-            foreground(CallNotifications.ongoing(this, call.peerName, call.session.camera.value, null), call.session.camera.value)
+            foreground(CallNotifications.ongoing(this, call.title, call.session.camera.value, null), call.session.camera.value)
         } else {
             foreground(CallNotifications.connecting(this), camera = false)
         }
@@ -77,7 +77,7 @@ class TalqCallService : Service() {
                     if (ended) {
                         if (!calls.starting.value) stopSelf()
                     } else {
-                        foreground(CallNotifications.ongoing(this, call.peerName, camera, since), camera)
+                        foreground(CallNotifications.ongoing(this, call.title, camera, since), camera)
                     }
                 }
         }

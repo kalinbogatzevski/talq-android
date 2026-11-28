@@ -86,7 +86,7 @@ object CallNotifications {
             .setSmallIcon(R.drawable.ic_stat_talq)
             .setColor(TalqNotifications.accentColor(context))
             .setContentTitle(ring.callerName)
-            .setContentText("Incoming call")
+            .setContentText(if (ring.oneToOne == false) "Group call" else "Incoming call")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -148,7 +148,7 @@ object CallNotifications {
             .setSilent(true)
             .build()
 
-    /** "You missed a call" (or, [busy], "called while you were in another call"). */
+    /** "You missed a call" (or, [busy], "called while you were in another call"). [callBack]: offer Call back. */
     @SuppressLint("MissingPermission")
     fun showMissed(context: Context, nid: Long, token: String, callerName: String, busy: Boolean, callBack: Boolean = true) {
         val manager = NotificationManagerCompat.from(context)
@@ -185,9 +185,12 @@ object CallNotifications {
         NotificationManagerCompat.from(context).cancel(RING_ID)
     }
 
-    /** A call in a group conversation: no ringing (it cannot be answered here), a notice that opens the chat. */
+    /**
+     * A group call still running that the user did not answer: quiet (no sound, no pop-up), Join
+     * places the user in it, a tap opens the chat. The ringer takes it down when the call is over.
+     */
     @SuppressLint("MissingPermission")
-    fun showGroupCall(context: Context, nid: Long, token: String, roomName: String) {
+    fun showGroupJoin(context: Context, nid: Long, token: String, roomName: String, keepMs: Long) {
         val manager = NotificationManagerCompat.from(context)
         if (!manager.areNotificationsEnabled()) return
         ensureChannels(context)
@@ -195,14 +198,23 @@ object CallNotifications {
             context, requestCode(nid, 3), DeepLink(token, null, null).toIntent(context),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        val join = PendingIntent.getActivity(
+            context, requestCode(nid, 5), CallActivity.joinIntent(context, token, video = false),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         val n = NotificationCompat.Builder(context, TalqNotifications.channelId(context, NotificationKind.Call))
             .setSmallIcon(R.drawable.ic_stat_talq)
             .setColor(TalqNotifications.accentColor(context))
             .setContentTitle(roomName.ifBlank { "A conversation" })
-            .setContentText("A group call started (group calls are not in this version yet)")
+            .setContentText("Group call in progress")
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setSilent(true)
+            // Also when the app's own watch is gone with its process.
+            .setTimeoutAfter(keepMs)
             .setAutoCancel(true)
             .setContentIntent(open)
+            // Joining needs the phone unlocked (the call screen shows over the lock screen).
+            .addAction(NotificationCompat.Action.Builder(0, "Join", join).setAuthenticationRequired(true).build())
             .build()
         manager.notify(TAG, nid.toInt(), n)
     }

@@ -29,7 +29,7 @@ TalQ is a native client for Nextcloud Talk, built with Kotlin and Jetpack Compos
 <b>Notifications and calls</b>
 <ul>
 <li>Notifications through your server's web push, by way of UnifiedPush (for example ntfy) or, in the standard build, Google Play services. Reply or mark as read in the notification. A muted topic stays silent.</li>
-<li>One-to-one audio and video calls with TalQ for desktop and the Nextcloud web app: incoming calls ring like phone calls, also over the lock screen; mute, camera, speaker and Bluetooth; the call goes on with the screen off. Needs Talk's high-performance backend on the server.</li>
+<li>Audio and video calls, one-to-one and in groups, with TalQ for desktop and the Nextcloud web app: calls ring like phone calls, also over the lock screen; a tile for everyone, shared screens with zoom; mute, camera, speaker and Bluetooth; the call goes on with the screen off. Needs Talk's high-performance backend on the server.</li>
 </ul>
 
 <b>And</b>
@@ -41,6 +41,6 @@ TalQ is a native client for Nextcloud Talk, built with Kotlin and Jetpack Compos
 <li>No analytics, no advertising, no trackers.</li>
 </ul>
 
-Group calls are not there yet. Some features show only where your server has them.
+Some features show only where your server has them.
 
 TalQ is an independent client and is not affiliated with Nextcloud GmbH. It needs a Nextcloud server with Talk.

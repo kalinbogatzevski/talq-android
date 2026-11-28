@@ -30,12 +30,17 @@ import talq.core.repo.TalkSession
 /**
  * Incoming calls (`appContainer.ringer`). Main thread.
  *
- * A call push in a one-to-one conversation becomes a ringing CallStyle notification at once
- * (full screen over the lock screen, the ringtone, Answer and Decline), held up by
- * [TalqRingService] so the app keeps running while it rings; the caller's name and picture
- * follow once the conversation list answers. A call in a group conversation does not ring (it
- * cannot be answered here): it becomes an ordinary notice. The phone does not join the
- * conversation or its signaling while it rings: it joins only on Answer.
+ * A call push becomes a ringing CallStyle notification at once (full screen over the lock screen,
+ * the ringtone, Answer and Decline), held up by [TalqRingService] so the app keeps running while
+ * it rings; the caller's name and picture (a group call: the conversation's) follow once the
+ * conversation list answers. The phone does not join the conversation or its signaling while it
+ * rings: it joins only on Answer. The server sends no call push to a user who turned call
+ * notifications off for that conversation.
+ *
+ * A GROUP call that was not answered (45 s, Decline, a failed answer) does not become "missed"
+ * while it still runs: a quiet "Group call" notification with Join stays, `notification-state`
+ * is asked every 15 s, and it goes when the call is over, the user joined (here or elsewhere), or
+ * the user signs out.
  *
  * While it rings, `GET call/{token}/notification-state` is asked every 3 s: 200 keeps ringing,
  * 201 (the call is over) stops and leaves a missed call, 404 (answered on another device, or the
@@ -68,24 +73,32 @@ class CallRinger(context: Context, private val container: AppContainer) {
     /** The ring the user answered, until the answer is settled: a failed one becomes a missed call. */
     private var answeredRing: Ringing? = null
 
+    /** The group call left as a "Join" notification, and its watch. */
+    private var joinWatch: Job? = null
+    private var joinNid = 0L
+
     /**
-     * Rings for the call push [nid] in [token]. Returns false when this call is not one to ring
-     * (a group conversation): the caller shows the push as an ordinary notification then.
+     * Rings for the call push [nid] in [token]. Returns false when this call is not one to ring:
+     * the caller shows the push as an ordinary notification then (no conversation named).
      */
     fun ring(nid: Long, token: String, subject: String): Boolean {
         if (token.isEmpty()) return true
         val current = _ringing.value
         if (current?.nid == nid) return true
         val room = container.session?.rooms?.room(token)
-        if (room != null && !room.isOneToOne) return false
         val name = room?.displayName?.ifBlank { null } ?: subject.ifBlank { "Incoming call" }
         val calls = container.calls
         if (calls.busy || (current != null && current.token != token)) {
-            // Already in (or setting up) a call, or another one rings: no ringing over it.
-            if (calls.current.value?.token != token) CallNotifications.showMissed(appContext, nid, token, name, busy = true)
+            // Already in (or setting up) a call, or another one rings: no ringing over it. A group
+            // call is offered as Join (calling back would start a call that rings everyone).
+            if (calls.current.value?.token != token) {
+                if (room?.isOneToOne == false) offerJoin(Ringing(nid, token, name, "", oneToOne = false))
+                else CallNotifications.showMissed(appContext, nid, token, name, busy = true)
+            }
             return true
         }
         stopRinging()
+        if (joinNid != 0L) clearJoin()
         val ring = Ringing(nid, token, name, room?.partnerUserId.orEmpty(), oneToOne = room?.isOneToOne)
         _ringing.value = ring
         avatar = null
@@ -108,10 +121,18 @@ class CallRinger(context: Context, private val container: AppContainer) {
 
     /**
      * Declined here: stop, and take the server's notification down for the user's other
-     * devices. [done] runs once that is over (the notification button keeps the app up till then).
+     * devices. A group call is declined here only and stays offered as a "Join" notification
+     * while it runs. [done] runs once that is over (the notification button keeps the app up till then).
      */
     fun decline(nid: Long, done: () -> Unit = {}) {
-        if (_ringing.value?.nid == nid) stopRinging()
+        val ring = _ringing.value?.takeIf { it.nid == nid }
+        if (ring != null) stopRinging()
+        // A group call: declined here only. Dismissing the server's notification would reach this
+        // phone too (a delete push) and take the Join notification down with it.
+        if (ring?.oneToOne == false) {
+            offerJoin(ring)
+            return done()
+        }
         if (nid == 0L) return done()
         scope.launch {
             try {
@@ -137,15 +158,15 @@ class CallRinger(context: Context, private val container: AppContainer) {
 
     /**
      * The answer [nid] went through ([answered]) or not; a failed or cancelled one is a missed
-     * call ([groupCall]: a notice that a group call started instead).
+     * call (a group call: offered as "Join" while it runs).
      */
-    fun answerSettled(nid: Long, answered: Boolean, groupCall: Boolean = false) {
+    fun answerSettled(nid: Long, answered: Boolean) {
         val ring = answeredRing?.takeIf { it.nid == nid } ?: return
         answeredRing = null
         when {
             answered -> Unit
-            groupCall -> CallNotifications.showGroupCall(appContext, ring.nid, ring.token, ring.callerName)
-            else -> CallNotifications.showMissed(appContext, ring.nid, ring.token, ring.callerName, busy = false, callBack = ring.oneToOne != false)
+            ring.oneToOne == false -> offerJoin(ring)
+            else -> CallNotifications.showMissed(appContext, ring.nid, ring.token, ring.callerName, busy = false)
         }
     }
 
@@ -158,7 +179,10 @@ class CallRinger(context: Context, private val container: AppContainer) {
         if (ring.token == exceptToken) stopRinging() else missed(ring)
     }
 
-    fun signedOut() = stopRinging()
+    fun signedOut() {
+        stopRinging()
+        clearJoin()
+    }
 
     /** The ringing notification as it should show now (for [TalqRingService]). */
     fun notification(): Notification? = _ringing.value?.let { CallNotifications.incoming(appContext, it, avatar) }
@@ -186,7 +210,8 @@ class CallRinger(context: Context, private val container: AppContainer) {
                     }
                     if (_ringing.value?.nid != ring.nid) return
                     when (state) {
-                        NotificationState.Missed -> return missed(ring)
+                        // A group call that is over leaves nothing (the server tells of missed group calls itself).
+                        NotificationState.Missed -> return if (_ringing.value?.oneToOne == false) stopRinging() else missed(ring)
                         NotificationState.Gone, NotificationState.Forbidden -> return stopRinging()
                         NotificationState.Ringing, null -> Unit
                     }
@@ -196,7 +221,7 @@ class CallRinger(context: Context, private val container: AppContainer) {
         }
     }
 
-    /** The caller's name from the conversation list, and their picture; a group call stops here. */
+    /** The caller's name from the conversation list, and their picture (a group call: the conversation's). */
     private suspend fun refine(ring: Ringing) {
         val session = awaitSession() ?: return
         // Tried again while it rings: a cold start may have no network for a moment.
@@ -208,25 +233,29 @@ class CallRinger(context: Context, private val container: AppContainer) {
             if (room == null) delay(REFINE_RETRY_MS)
         }
         if (_ringing.value?.nid != ring.nid) return
-        if (!room.isOneToOne) {
-            stopRinging()
-            CallNotifications.showGroupCall(appContext, ring.nid, ring.token, room.displayName)
-            return
-        }
-        val named = ring.copy(callerName = room.displayName.ifBlank { ring.callerName }, callerUserId = room.partnerUserId, oneToOne = true)
+        val oneToOne = room.isOneToOne
+        val named = ring.copy(
+            callerName = room.displayName.ifBlank { ring.callerName },
+            callerUserId = if (oneToOne) room.partnerUserId else "",
+            oneToOne = oneToOne,
+        )
         if (named != ring) {
             _ringing.value = named
             post(named)
         }
-        if (room.partnerUserId.isEmpty()) return
-        val picture = withTimeoutOrNull(AVATAR_WAIT_MS) { loadAvatar(session, room.partnerUserId) } ?: return
+        val url = when {
+            !oneToOne -> session.client.roomAvatarUrl(room.token, room.avatarVersion)
+            room.partnerUserId.isNotEmpty() -> session.client.userAvatarUrl(room.partnerUserId, 256)
+            else -> return
+        }
+        val picture = withTimeoutOrNull(AVATAR_WAIT_MS) { loadAvatar(session, url) } ?: return
         if (_ringing.value?.nid != ring.nid) return
         avatar = picture
         post(_ringing.value ?: return)
     }
 
-    private suspend fun loadAvatar(session: TalkSession, userId: String): Bitmap? = try {
-        val request = authorizedImage(appContext, session.client.userAvatarUrl(userId, 256), session.client.authorizationHeader)
+    private suspend fun loadAvatar(session: TalkSession, url: String): Bitmap? = try {
+        val request = authorizedImage(appContext, url, session.client.authorizationHeader)
             .newBuilder()
             .size(256)
             .allowHardware(false)
@@ -240,8 +269,43 @@ class CallRinger(context: Context, private val container: AppContainer) {
     private fun missed(ring: Ringing) {
         val now = _ringing.value?.takeIf { it.nid == ring.nid } ?: ring
         stopRinging()
-        // "Call back" only where it can work (a one-to-one conversation, or not known to be a group).
-        CallNotifications.showMissed(appContext, now.nid, now.token, now.callerName, busy = false, callBack = now.oneToOne != false)
+        // A group call may still be running: offer it, don't call it missed.
+        if (now.oneToOne == false) offerJoin(now) else CallNotifications.showMissed(appContext, now.nid, now.token, now.callerName, busy = false)
+    }
+
+    /**
+     * A group call the user did not answer: a quiet "Join" notification, kept while the call runs
+     * (`notification-state` every 15 s) and taken down when it is over, when the user is in it
+     * (here or on another device), or after [JOIN_KEEP_MS] at most.
+     */
+    private fun offerJoin(ring: Ringing) {
+        clearJoin()
+        joinNid = ring.nid
+        CallNotifications.showGroupJoin(appContext, ring.nid, ring.token, ring.callerName, JOIN_KEEP_MS)
+        joinWatch = scope.launch {
+            val until = System.currentTimeMillis() + JOIN_KEEP_MS
+            while (System.currentTimeMillis() < until) {
+                delay(JOIN_POLL_MS)
+                if (container.calls.current.value?.token == ring.token) break
+                val session = container.session ?: break
+                if (!session.capabilities.callNotificationState) continue
+                val state = try {
+                    withTimeoutOrNull(REQUEST_WAIT_MS) { session.client.callNotificationState(ring.token) }
+                } catch (e: TalkError) {
+                    null
+                }
+                if (state == NotificationState.Missed || state == NotificationState.Gone || state == NotificationState.Forbidden) break
+            }
+            CallNotifications.cancel(appContext, ring.nid)
+            if (joinNid == ring.nid) joinNid = 0L
+        }
+    }
+
+    private fun clearJoin() {
+        joinWatch?.cancel()
+        joinWatch = null
+        if (joinNid != 0L) CallNotifications.cancel(appContext, joinNid)
+        joinNid = 0L
     }
 
     private fun stopRinging() {
@@ -280,5 +344,7 @@ class CallRinger(context: Context, private val container: AppContainer) {
         private const val AVATAR_WAIT_MS = 10_000L
         private const val REQUEST_WAIT_MS = 5_000L
         private const val REFINE_RETRY_MS = 5_000L
+        private const val JOIN_POLL_MS = 15_000L
+        private const val JOIN_KEEP_MS = 4 * 60 * 60 * 1000L
     }
 }

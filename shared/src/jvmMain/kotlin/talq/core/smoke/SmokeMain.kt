@@ -20,6 +20,10 @@ import talq.core.call.IceServer
 import talq.core.call.LocalCandidate
 import talq.core.call.MediaConnection
 import talq.core.call.MediaEngine
+import talq.core.call.PublishRights
+import talq.core.call.RemoteStatus
+import talq.core.call.SubscriberKey
+import talq.core.call.CallMode
 import talq.core.call.SentSignal
 import talq.core.call.HpbConnection
 import talq.core.call.HpbInbound
@@ -436,8 +440,8 @@ object SmokeMain {
             runCatching { b.client.leaveCall(token) }
         }
         val clock = { System.currentTimeMillis() }
-        val sessionA = CallSession(a.client, http, token, b.user.userId, StubEngine(), this, clock, log = { println("    A: $it") })
-        val sessionB = CallSession(b.client, http, token, a.user.userId, StubEngine(), this, clock, log = { println("    B: $it") })
+        val sessionA = CallSession(a.client, http, token, CallMode.OneToOne(b.user.userId), PublishRights.ALL, StubEngine(), this, clock, log = { println("    A: $it") })
+        val sessionB = CallSession(b.client, http, token, CallMode.OneToOne(a.user.userId), PublishRights.ALL, StubEngine(), this, clock, log = { println("    B: $it") })
         try {
             launch { sessionA.start(video = false) }
             check("A waits for the peer", awaitState(sessionA, 15_000) { it is CallState.WaitingForPeer },
@@ -461,8 +465,47 @@ object SmokeMain {
         } finally {
             sessionA.hangUp()
             sessionB.hangUp()
-            http.close()
-            b.close()
+        }
+        groupCallChecks(a, b, http, token)
+        http.close()
+        b.close()
+    }
+
+    /**
+     * The same two bots in GROUP mode: A starts, B joins; A lists B as its one participant and
+     * asks for B's media; B leaves and A stays in the call, waiting for others; then A leaves.
+     */
+    private suspend fun groupCallChecks(a: TalkSession, b: TalkSession, http: io.ktor.client.HttpClient, token: String) = coroutineScope {
+        println("\n== calls: group call session (stand-in media, bots' room)")
+        val clock = { System.currentTimeMillis() }
+        val sessionA = CallSession(a.client, http, token, CallMode.Group, PublishRights.ALL, StubEngine(), this, clock, log = { println("    A: $it") })
+        val sessionB = CallSession(b.client, http, token, CallMode.Group, PublishRights.ALL, StubEngine(), this, clock, log = { println("    B: $it") })
+        try {
+            launch { sessionA.start(video = false) }
+            check("group: A waits for others", awaitState(sessionA, 15_000) { it is CallState.WaitingForPeer },
+                "state=${sessionA.state.value}")
+            launch { sessionB.answer(video = false) }
+            val listed = withTimeoutOrNull(20_000) {
+                sessionA.participants.first { list -> list.any { it.sid == sessionB.ownSessionId.value && it.sid.isNotEmpty() } }
+            } != null
+            check("group: A lists B as a participant", listed, "participants=${sessionA.participants.value.size}")
+            check("group: A requested B's stream", awaitSent(sessionA, 20_000) {
+                it.type == "requestoffer" && it.to.isNotEmpty() && it.to == sessionB.ownSessionId.value
+            })
+            check("group: no hang-up hint is sent", sessionB.sent.replayCache.none { it.type == "hangup" })
+            sessionB.hangUp()
+            val gone = withTimeoutOrNull(15_000) { sessionA.participants.first { it.isEmpty() } } != null
+            check("group: B's tile goes when B leaves", gone, "participants=${sessionA.participants.value.size}")
+            check("group: A stays in the call", sessionA.state.value !is CallState.Ended, "state=${sessionA.state.value}")
+            sessionA.hangUp()
+            val emptied = withTimeoutOrNull(10_000) {
+                while (runCatching { a.client.callPeers(token) }.getOrNull()?.isEmpty() != true) delay(1_000)
+                true
+            } == true
+            check("group: no call left in the room", emptied)
+        } finally {
+            sessionA.hangUp()
+            sessionB.hangUp()
         }
     }
 
@@ -474,16 +517,19 @@ object SmokeMain {
 
     /** Media for signaling checks: a canned SDP that the media server refuses, no candidates. */
     private class StubEngine : MediaEngine {
-        override suspend fun createPublisherOffer(iceServers: List<IceServer>, video: Boolean): String = CANNED_SDP
+        override suspend fun createPublisherOffer(iceServers: List<IceServer>, rights: PublishRights, video: Boolean): String = CANNED_SDP
         override suspend fun setPublisherAnswer(sdp: String) {}
-        override suspend fun answerSubscriber(peerSessionId: String, offerSdp: String, iceServers: List<IceServer>): String = CANNED_SDP
-        override fun addRemoteCandidate(peerSessionId: String?, candidate: String, sdpMid: String?, sdpMLineIndex: Int) {}
+        override fun closePublisher() {}
+        override suspend fun answerSubscriber(key: SubscriberKey, offerSdp: String, iceServers: List<IceServer>): String = CANNED_SDP
+        override fun closeSubscriber(key: SubscriberKey) {}
+        override fun addRemoteCandidate(key: SubscriberKey?, candidate: String, sdpMid: String?, sdpMLineIndex: Int) {}
         override fun setLocalAudio(enabled: Boolean) {}
         override fun setLocalVideo(enabled: Boolean) {}
         override fun sendStatus(type: String) {}
         override val localCandidates: Flow<LocalCandidate> = emptyFlow()
         override val publisher = MutableStateFlow(MediaConnection.New)
-        override val subscriber = MutableStateFlow(MediaConnection.New)
+        override val subscribers = MutableStateFlow<Map<SubscriberKey, MediaConnection>>(emptyMap())
+        override val remoteStatus: Flow<RemoteStatus> = emptyFlow()
         override fun rebuild() {}
         override fun close() {}
 

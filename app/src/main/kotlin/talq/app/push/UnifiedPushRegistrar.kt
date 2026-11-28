@@ -394,8 +394,8 @@ class UnifiedPushRegistrar(context: Context, private val container: AppContainer
         container.restoreIfUnreachable()
         when (payload) {
             is PushPayload.Activation -> container.scope.launch { activate(payload.token) }
-            // A call in a one-to-one conversation rings like a phone call (CallRinger); other
-            // calls stay ordinary notifications.
+            // A call rings like a phone call (CallRinger), in a group conversation too; a call
+            // push the ringer cannot place stays an ordinary notification.
             is PushPayload.Notify -> if (payload.isTalk && payload.objectType == "call") {
                 if (loggingOut) return
                 container.scope.launch {

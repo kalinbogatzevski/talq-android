@@ -14,6 +14,79 @@ object CallFlags {
     const val VIDEO_CALL = IN_CALL or WITH_AUDIO or WITH_VIDEO
 }
 
+/** The attendee permission bits that matter for calls (Talk's constants.md, a room's `permissions`). */
+object CallPermissions {
+    const val START_CALL = 2
+    const val IGNORE_LOBBY = 8
+    const val PUBLISH_AUDIO = 16
+    const val PUBLISH_VIDEO = 32
+    const val PUBLISH_SCREEN = 64
+}
+
+/**
+ * What this user may send in a call. The signaling server refuses a whole offer that has a video
+ * section without the video permission, so the publisher carries only what is allowed.
+ */
+data class PublishRights(val audio: Boolean, val video: Boolean) {
+    /** Something may be sent; without it the user only listens (no publisher at all). */
+    val any: Boolean get() = audio || video
+
+    companion object {
+        val ALL = PublishRights(audio = true, video = true)
+
+        /** From a room's or a roster row's `permissions`; 0 = not sent = everything allowed. */
+        fun of(permissions: Int): PublishRights = if (permissions == 0) {
+            ALL
+        } else {
+            PublishRights(
+                audio = permissions and CallPermissions.PUBLISH_AUDIO != 0,
+                video = permissions and CallPermissions.PUBLISH_VIDEO != 0,
+            )
+        }
+    }
+}
+
+/** A one-to-one call (its rules: hang-up hint, waiting for the other person, failover) or a group call. */
+sealed interface CallMode {
+    data class OneToOne(val peerUserId: String) : CallMode
+
+    data object Group : CallMode
+}
+
+/** What a subscriber receives from a person: their camera and microphone, or a screen they share. */
+enum class StreamKind(val roomType: String) {
+    Camera("video"),
+    Screen("screen"),
+    ;
+
+    companion object {
+        fun of(roomType: String): StreamKind? = entries.firstOrNull { it.roomType == roomType }
+    }
+}
+
+/** One subscriber: a person's signaling session and what is received from it. */
+data class SubscriberKey(val sid: String, val kind: StreamKind)
+
+/**
+ * Someone else in the call, as the call screen shows them. [audio] / [video] = what they send (their
+ * flags, mute messages and data-channel status); [camera] / [screen] = the state of what we receive
+ * from them ([MediaConnection.New] while there is nothing); [sharing] = they share a screen now.
+ */
+data class CallParticipant(
+    val sid: String,
+    val userId: String,
+    val displayName: String,
+    val audio: Boolean,
+    val video: Boolean,
+    val speaking: Boolean,
+    val camera: MediaConnection,
+    val sharing: Boolean,
+    val screen: MediaConnection,
+)
+
+/** A status message one person's client sent on its data channel (audioOn, speaking, ...). */
+data class RemoteStatus(val sid: String, val type: String)
+
 /** One STUN or TURN server. [toString] never shows the TURN user or secret. */
 data class IceServer(val urls: List<String>, val username: String = "", val credential: String = "") {
     override fun toString(): String =
@@ -71,13 +144,13 @@ sealed interface CallState {
     /** Setting up: signaling, joining the call, or, once the other person is in, the media connecting. */
     data object Connecting : CallState
 
-    /** In the call; the other person has not joined yet (an outgoing call that is ringing). */
+    /** In the call; nobody else is in it yet (an outgoing call that is ringing, or an empty group call). */
     data object WaitingForPeer : CallState
 
     /** Media flows. [since] is when it first did (the session's clock, ms); kept across a reconnect. */
     data class Active(val since: Long) : CallState
 
-    /** The signaling or the media dropped; trying to get them back (20 s at most). */
+    /** The signaling or the media dropped; trying to get them back (45 s at most). */
     data object Reconnecting : CallState
 
     data class Ended(val reason: CallEndReason) : CallState
@@ -104,10 +177,13 @@ enum class CallEndReason {
 
     /** The microphone (or camera) may not be used. */
     PermissionDenied,
-}
 
-/** The other person in the call: what they send, as they announce it, and their name. */
-data class PeerMedia(val audio: Boolean, val video: Boolean, val displayName: String)
+    /** A moderator ended the call for everyone. */
+    EndedForEveryone,
+
+    /** A group call where nobody else was in the call for a minute. */
+    Alone,
+}
 
 /** A message the call sent on the signaling socket: its type and the session it went to. No payload. */
 data class SentSignal(val type: String, val to: String)

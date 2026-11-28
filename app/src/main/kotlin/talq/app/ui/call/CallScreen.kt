@@ -79,6 +79,8 @@ import talq.app.ui.common.Avatar
 import talq.core.call.CallEndReason
 import talq.core.call.CallState
 import talq.core.call.MediaConnection
+import talq.core.call.StreamKind
+import talq.core.call.SubscriberKey
 
 /** Everything the call activity shows, by what it was opened for. It is drawn in the dark Vivid theme. */
 @Composable
@@ -127,13 +129,20 @@ private fun RingScreen(request: CallActivity.Request.Ring, onAnswer: () -> Unit,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(if (compact) 8.dp else 72.dp))
-        if (session != null && ring.callerUserId.isNotEmpty()) {
-            Avatar(session.client.userAvatarUrl(ring.callerUserId, 256), session.client.authorizationHeader, ring.callerName, size = if (compact) 72.dp else 120.dp)
+        val picture = when {
+            session == null -> null
+            ring.callerUserId.isNotEmpty() -> session.client.userAvatarUrl(ring.callerUserId, 256)
+            // A group: the conversation's picture, as the call screen draws it.
+            ring.oneToOne == false -> session.client.roomAvatarUrl(ring.token, session.rooms.room(ring.token)?.avatarVersion.orEmpty(), !colors.isLight)
+            else -> null
+        }
+        if (session != null && picture != null) {
+            Avatar(picture, session.client.authorizationHeader, ring.callerName, size = if (compact) 72.dp else 120.dp)
             Spacer(Modifier.height(if (compact) 8.dp else 20.dp))
         }
         Text(ring.callerName, style = MaterialTheme.typography.headlineSmall, color = colors.textPrimary, textAlign = TextAlign.Center)
         Spacer(Modifier.height(6.dp))
-        Text("Incoming call", style = MaterialTheme.typography.bodyLarge, color = colors.textSecondary)
+        Text(if (ring.oneToOne == false) "Group call" else "Incoming call", style = MaterialTheme.typography.bodyLarge, color = colors.textSecondary)
         Spacer(Modifier.weight(1f))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             RoundButton(Icons.Filled.CallEnd, "Decline", colors.danger, size = 72) {
@@ -197,7 +206,12 @@ private fun Starter(request: CallActivity.Request, onRequest: (CallActivity.Requ
     fun begin(consent: Boolean) {
         if (cancelled) return
         phase = StartPhase.Starting
-        calls.begin(CallController.StartRequest(launch, token, video, incoming = request is CallActivity.Request.Answer, nid, consent))
+        calls.begin(
+            CallController.StartRequest(
+                launch, token, video, incoming = request is CallActivity.Request.Answer, nid, consent,
+                join = (request as? CallActivity.Request.Outgoing)?.join == true,
+            ),
+        )
     }
 
     fun stop(message: String, settings: Boolean = false) {
@@ -318,14 +332,20 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
     val calls = container.calls
     val colors = TalqTheme.colors
     val state by call.session.state.collectAsStateWithLifecycle()
-    val peer by call.session.peer.collectAsStateWithLifecycle()
+    val participants by call.session.participants.collectAsStateWithLifecycle()
+    val sessionNotice by call.session.notice.collectAsStateWithLifecycle()
     val mic by call.session.microphone.collectAsStateWithLifecycle()
     val camera by call.session.camera.collectAsStateWithLifecycle()
-    val remote by call.engine.remoteVideo.collectAsStateWithLifecycle()
+    val videos by call.engine.remoteVideos.collectAsStateWithLifecycle()
     val front by call.engine.frontCamera.collectAsStateWithLifecycle()
     val hears by call.engine.audioArrives.collectAsStateWithLifecycle()
-    val receiving by call.engine.subscriber.collectAsStateWithLifecycle()
     val cameraFailed by call.engine.cameraFailed.collectAsStateWithLifecycle()
+    // One other person (or nobody yet): the one-to-one layout. More, or a shared screen: the stage.
+    var pickedScreen by remember { mutableStateOf<String?>(null) }
+    val sharer = shownScreen(participants, videos, pickedScreen)
+    val peer = participants.singleOrNull()
+    val remote = peer?.let { videos[SubscriberKey(it.sid, StreamKind.Camera)] }
+    val receiving = peer?.camera ?: MediaConnection.New
     val audioProblem by call.engine.audioProblem.collectAsStateWithLifecycle()
     val outputs by calls.endpoints.collectAsStateWithLifecycle()
     val output by calls.endpoint.collectAsStateWithLifecycle()
@@ -354,9 +374,14 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
     }
 
     val ended = state is CallState.Ended
-    val remoteShown = !ended && peer?.video == true && remote != null
+    val staged = !ended && (sharer != null || participants.size >= 2)
+    LaunchedEffect(peer?.sid, staged) {
+        val p = peer
+        if (p != null && !staged) call.session.setSubstream(p.sid, 2)
+    }
+    val remoteShown = !ended && !staged && peer?.video == true && remote != null
     val previewShown = !ended && camera
-    if (remoteShown || camera) KeepScreenOn()
+    if (remoteShown || camera || staged) KeepScreenOn()
     BackHandler(enabled = ended) { onDone() }
     LaunchedEffect(ended) {
         if (ended) {
@@ -366,7 +391,7 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
     }
     val peerSends = peer?.let { it.audio || it.video } == true
     val downSince = receivingDownSince
-    val cantHear = state is CallState.Active && peerSends &&
+    val cantHear = !call.isGroup && state is CallState.Active && peerSends &&
         ((downSince != null && now - downSince > NOTHING_ARRIVES_MS) || (receiving == MediaConnection.Connected && peer?.audio == true && !hears))
     val compact = landscape()
 
@@ -378,31 +403,66 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(if (remoteShown || compact) 16.dp else 72.dp))
-            if (!remoteShown) {
-                Avatar(
-                    call.account.client.userAvatarUrl(call.peerUserId, 256),
-                    call.account.client.authorizationHeader,
-                    call.peerName,
-                    size = if (compact) 72.dp else 120.dp,
-                )
-                Spacer(Modifier.height(if (compact) 8.dp else 20.dp))
+            val people = participants.size + 1
+            val line = stateLine(state, peer?.displayName ?: call.title, now, call.isGroup) +
+                if (call.isGroup && state is CallState.Active) " · $people people" else ""
+            if (staged) {
+                Spacer(Modifier.height(8.dp))
+                Text(call.title, style = MaterialTheme.typography.titleMedium, color = colors.textPrimary, maxLines = 1)
+                Text(line, style = MaterialTheme.typography.bodyMedium, color = colors.textSecondary)
+                Spacer(Modifier.height(8.dp))
+            } else {
+                Spacer(Modifier.height(if (remoteShown || compact) 16.dp else 72.dp))
+                if (!remoteShown) {
+                    when {
+                        peer != null && call.isGroup -> PersonPicture(call, peer, size = if (compact) 72 else 120)
+                        call.isGroup -> Avatar(
+                            call.account.client.roomAvatarUrl(call.token, call.account.rooms.room(call.token)?.avatarVersion.orEmpty(), !colors.isLight),
+                            call.account.client.authorizationHeader,
+                            call.title,
+                            size = if (compact) 72.dp else 120.dp,
+                        )
+                        else -> Avatar(
+                            call.account.client.userAvatarUrl(call.peerUserId.orEmpty(), 256),
+                            call.account.client.authorizationHeader,
+                            call.title,
+                            size = if (compact) 72.dp else 120.dp,
+                        )
+                    }
+                    Spacer(Modifier.height(if (compact) 8.dp else 20.dp))
+                }
+                val name = if (call.isGroup) call.title else peer?.displayName?.takeIf { it.isNotBlank() } ?: call.title
+                Text(name, style = MaterialTheme.typography.headlineSmall, color = colors.textPrimary)
+                if (call.isGroup && peer != null) {
+                    Text("with ${peer.displayName}", style = MaterialTheme.typography.bodyMedium, color = colors.textSecondary)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(line, style = MaterialTheme.typography.bodyLarge, color = colors.textSecondary)
             }
-            Text(peer?.displayName?.takeIf { it.isNotBlank() } ?: call.peerName, style = MaterialTheme.typography.headlineSmall, color = colors.textPrimary)
-            Spacer(Modifier.height(6.dp))
-            Text(stateLine(state, call.peerName, now), style = MaterialTheme.typography.bodyLarge, color = colors.textSecondary)
             val lines = buildList {
                 if (cantHear) add("Can't hear them" to colors.amber)
                 audioProblem?.takeIf { !ended }?.let { add(it to colors.amber) }
                 if (camera && cameraFailed && !ended) add("The camera could not be used" to colors.amber)
-                if (peer?.audio == false && !ended) add("Their microphone is off" to colors.textSecondary)
+                if (!staged && peer?.audio == false && !ended) add("Their microphone is off" to colors.textSecondary)
+                sessionNotice?.takeIf { !ended }?.let { add(it to colors.textSecondary) }
                 notice?.let { add(it to colors.textSecondary) }
             }
             for ((text, ink) in lines) {
                 Spacer(Modifier.height(4.dp))
                 Text(text, style = MaterialTheme.typography.bodyMedium, color = ink, textAlign = TextAlign.Center)
             }
-            Spacer(Modifier.weight(1f))
+            if (staged) {
+                Spacer(Modifier.height(8.dp))
+                val s = sharer
+                if (s != null) {
+                    ScreenStage(call, s, participants, videos, compact, onPick = { pickedScreen = it }, modifier = Modifier.weight(1f).fillMaxWidth())
+                } else {
+                    PeopleGrid(call, participants, videos, Modifier.weight(1f).fillMaxWidth())
+                }
+                Spacer(Modifier.height(12.dp))
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 RoundButton(
                     if (mic) Icons.Filled.Mic else Icons.Filled.MicOff, if (mic) "Mute" else "Unmute",
@@ -422,7 +482,7 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
                 }
                 if (camera) RoundButton(Icons.Filled.Cameraswitch, "Switch camera", colors.bgSecondary) { call.engine.switchCamera() }
                 if (outputs.size > 1) RoundButton(outputIcon(output), "Audio output", colors.bgSecondary) { choosingOutput = true }
-                RoundButton(Icons.Filled.CallEnd, "Hang up", colors.danger, size = 64) { calls.hangUp() }
+                RoundButton(Icons.Filled.CallEnd, if (call.isGroup) "Leave" else "Hang up", colors.danger, size = 64) { calls.hangUp() }
             }
             Spacer(Modifier.height(if (compact) 12.dp else 32.dp))
         }
@@ -456,9 +516,9 @@ private fun InCallScreen(call: CallController.ActiveCall, onDone: () -> Unit, st
     }
 }
 
-private fun stateLine(state: CallState, peerName: String, now: Long): String = when (state) {
+private fun stateLine(state: CallState, peerName: String, now: Long, group: Boolean): String = when (state) {
     CallState.Connecting -> "Connecting…"
-    CallState.WaitingForPeer -> "Calling…"
+    CallState.WaitingForPeer -> if (group) "Waiting for others…" else "Calling…"
     is CallState.Active -> duration(now - state.since)
     CallState.Reconnecting -> "Reconnecting…"
     is CallState.Ended -> when (state.reason) {
@@ -469,6 +529,8 @@ private fun stateLine(state: CallState, peerName: String, now: Long): String = w
         CallEndReason.Declined -> "Declined"
         CallEndReason.NoHpb -> "This server cannot make calls"
         CallEndReason.PermissionDenied -> "Microphone permission is needed for calls"
+        CallEndReason.EndedForEveryone -> "The call was ended"
+        CallEndReason.Alone -> "Nobody else is in the call"
     }
 }
 

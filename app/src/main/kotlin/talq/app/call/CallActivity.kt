@@ -32,7 +32,8 @@ class CallActivity : ComponentActivity() {
      * second call to the same person must start a second call).
      */
     sealed interface Request {
-        data class Outgoing(val token: String, val video: Boolean, val launch: Long) : Request
+        /** [join]: join the call that runs there; never start one (it would ring the whole conversation). */
+        data class Outgoing(val token: String, val video: Boolean, val launch: Long, val join: Boolean = false) : Request
         data class Answer(val token: String, val nid: Long, val launch: Long) : Request
         data class Ring(val token: String, val nid: Long, val launch: Long) : Request
         data object Show : Request
@@ -102,7 +103,11 @@ class CallActivity : ComponentActivity() {
         // notification button (a recreated screen does not parse its intent again).
         val launch = System.nanoTime()
         return when (intent?.action) {
-            ACTION_OUTGOING -> if (token.isNotEmpty()) Request.Outgoing(token, intent.getBooleanExtra(EXTRA_VIDEO, false), launch) else Request.Show
+            ACTION_OUTGOING -> if (token.isNotEmpty()) {
+                Request.Outgoing(token, intent.getBooleanExtra(EXTRA_VIDEO, false), launch, join = intent.getBooleanExtra(EXTRA_JOIN, false))
+            } else {
+                Request.Show
+            }
             ACTION_ANSWER -> if (token.isNotEmpty()) Request.Answer(token, nid, launch) else Request.Show
             ACTION_RING -> if (token.isNotEmpty()) Request.Ring(token, nid, launch) else Request.Show
             else -> Request.Show
@@ -117,6 +122,7 @@ class CallActivity : ComponentActivity() {
         private const val EXTRA_TOKEN = "talq.call.token"
         private const val EXTRA_NID = "talq.call.nid"
         private const val EXTRA_VIDEO = "talq.call.video"
+        private const val EXTRA_JOIN = "talq.call.join"
         private const val EXTRA_LAUNCH = "talq.call.launch"
 
         private fun base(context: Context, action: String): Intent =
@@ -127,6 +133,10 @@ class CallActivity : ComponentActivity() {
 
         fun outgoingIntent(context: Context, token: String, video: Boolean): Intent =
             base(context, ACTION_OUTGOING).putExtra(EXTRA_TOKEN, token).putExtra(EXTRA_VIDEO, video)
+
+        /** Joins the call that runs in [token] (the Join bar, the Join notification); never starts one. */
+        fun joinIntent(context: Context, token: String, video: Boolean): Intent =
+            outgoingIntent(context, token, video).putExtra(EXTRA_JOIN, true)
 
         fun answerIntent(context: Context, token: String, nid: Long): Intent =
             base(context, ACTION_ANSWER).putExtra(EXTRA_TOKEN, token).putExtra(EXTRA_NID, nid)

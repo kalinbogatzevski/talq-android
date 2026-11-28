@@ -26,6 +26,9 @@ import talq.app.SessionState
 import talq.core.TalkError
 import talq.core.call.CallEndReason
 import talq.core.call.CallSession
+import talq.core.call.CallMode
+import talq.core.call.PublishRights
+import talq.core.call.callOffered
 import talq.core.call.CallState
 import talq.core.call.NotificationState
 import talq.core.model.Room
@@ -48,11 +51,15 @@ import java.util.WeakHashMap
  * screen can show how it ended.
  */
 class CallController(context: Context, private val container: AppContainer) {
-    /** The running (or just ended) call. */
+    /**
+     * The running (or just ended) call. [title] = the other person's name in a one-to-one call,
+     * the conversation's name in a group call; [peerUserId] = the other person (one-to-one only).
+     */
     class ActiveCall(
         val token: String,
-        val peerUserId: String,
-        val peerName: String,
+        val title: String,
+        val peerUserId: String?,
+        val isGroup: Boolean,
         val incoming: Boolean,
         val session: CallSession,
         val engine: WebRtcEngine,
@@ -69,6 +76,8 @@ class CallController(context: Context, private val container: AppContainer) {
         val incoming: Boolean,
         val nid: Long,
         val recordingConsent: Boolean,
+        /** Join the call that runs (the Join bar or notification): never start a new one. */
+        val join: Boolean = false,
     )
 
     sealed interface StartResult {
@@ -86,13 +95,13 @@ class CallController(context: Context, private val container: AppContainer) {
         /** Cancelled before the call was placed. */
         data object Cancelled : StartResult
 
-        /** [groupCall]: the call was in a group conversation (they do not ring or connect here). */
-        data class Failed(val message: String, val groupCall: Boolean = false) : StartResult
+        data class Failed(val message: String) : StartResult
     }
 
     private val appContext = context.applicationContext
     private val scope = container.scope
     private val telecom = CallTelecom(appContext, scope)
+    private val ringback = Ringback()
 
     private val _current = MutableStateFlow<ActiveCall?>(null)
     val current: StateFlow<ActiveCall?> = _current.asStateFlow()
@@ -225,7 +234,7 @@ class CallController(context: Context, private val container: AppContainer) {
         if (r.incoming) {
             val answered = result == StartResult.Started || result == StartResult.Running ||
                 (result is StartResult.Gone && result.answeredElsewhere)
-            container.ringer.answerSettled(r.nid, answered, groupCall = (result as? StartResult.Failed)?.groupCall == true)
+            container.ringer.answerSettled(r.nid, answered)
         }
         _lastStart.value = r.launch to result
     }
@@ -244,7 +253,24 @@ class CallController(context: Context, private val container: AppContainer) {
         )
         if (startCancelled) return StartResult.Cancelled
         val room = roomOf(account, r.token) ?: return StartResult.Failed("This conversation could not be found.")
-        if (!room.isOneToOne || room.partnerUserId.isEmpty()) return StartResult.Failed("Calls are for one-to-one conversations.", groupCall = true)
+        val joining = r.incoming || r.join
+        if (!callOffered(room, hasHpb = true, nowSeconds = System.currentTimeMillis() / 1000, joining = joining)) {
+            return StartResult.Failed("Calls aren't possible in this conversation.")
+        }
+        if (r.join) {
+            // A Join that comes late must not start a new call (it would ring everyone): the list is
+            // asked again, and the server's word on whether this user is called counts.
+            account.rooms.refresh()
+            if (account.rooms.room(r.token)?.hasCall == false) return StartResult.Gone(answeredElsewhere = false)
+            if (account.capabilities.callNotificationState) {
+                val state = try {
+                    account.client.callNotificationState(r.token)
+                } catch (e: TalkError) {
+                    null
+                }
+                if (state == NotificationState.Missed) return StartResult.Gone(answeredElsewhere = false)
+            }
+        }
         if (r.incoming && account.capabilities.callNotificationState) {
             // Joining a call that is over would start a new one that rings the caller.
             val state = try {
@@ -265,7 +291,8 @@ class CallController(context: Context, private val container: AppContainer) {
         val goodbye = scope.launch { container.typing.leaveForCall() }
         var built: WebRtcEngine? = null
         try {
-            withContext(NonCancellable + Dispatchers.Default) { built = WebRtcEngine(appContext, WebRtcEngine.egl(), r.video) }
+            val withCamera = r.video && PublishRights.of(room.permissions).video
+            withContext(NonCancellable + Dispatchers.Default) { built = WebRtcEngine(appContext, WebRtcEngine.egl(), withCamera) }
             goodbye.join()
         } catch (e: CancellationException) {
             built?.let { engine -> withContext(NonCancellable + Dispatchers.Default) { engine.close() } }
@@ -293,24 +320,39 @@ class CallController(context: Context, private val container: AppContainer) {
         // The call's own coroutines run off the main thread; teardown outlives this scope.
         val callScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val http = newHpbHttpClient()
+        val oneToOne = room.isOneToOne && room.partnerUserId.isNotEmpty()
         val session = CallSession(
             client = account.client,
             http = http,
             token = r.token,
-            peerUserId = room.partnerUserId,
+            mode = if (oneToOne) CallMode.OneToOne(room.partnerUserId) else CallMode.Group,
+            rights = PublishRights.of(room.permissions),
             engine = engine,
+            // Joining a call that runs notifies nobody; should it have ended a moment ago, the new
+            // one rings nobody either.
+            joinSilently = r.join || (r.incoming && !oneToOne),
             scope = callScope,
             now = { System.currentTimeMillis() },
             recordingConsent = r.recordingConsent,
             log = { Log.i(TAG, it) },
         )
-        val peerName = room.displayName.ifBlank { room.partnerUserId }
-        val call = ActiveCall(r.token, room.partnerUserId, peerName, r.incoming, session, engine, account, callScope)
+        val title = room.displayName.ifBlank { room.partnerUserId.ifBlank { "Call" } }
+        val call = ActiveCall(
+            token = r.token,
+            title = title,
+            peerUserId = room.partnerUserId.takeIf { oneToOne },
+            isGroup = !oneToOne,
+            incoming = r.incoming,
+            session = session,
+            engine = engine,
+            account = account,
+            scope = callScope,
+        )
         _current.value = call
         previous[r.token] = call
         held = false
         heldMicrophone = false
-        telecom.begin(peerName, r.token, r.incoming, r.video, object : CallTelecom.Listener {
+        telecom.begin(title, r.token, r.incoming, r.video, object : CallTelecom.Listener {
             override fun onSystemHangUp() = hangUp()
 
             override fun onHold(held: Boolean) = hold(call, held)
@@ -321,6 +363,9 @@ class CallController(context: Context, private val container: AppContainer) {
                 }
             }
         })
+        // The caller hears ringing until someone joins: one-to-one calls placed here, and group
+        // calls started here (joining a call that runs already rings nothing).
+        val withRingback = !r.incoming && (oneToOne || !room.hasCall)
         // start()/answer() return once set up; the call goes on in the session.
         callScope.launch { if (r.incoming) session.answer(r.video) else session.start(r.video) }
         // The signaling client lives until the session has left everything.
@@ -330,13 +375,15 @@ class CallController(context: Context, private val container: AppContainer) {
                 session.awaitClosed()
             }
         }
-        watch(call)
+        watch(call, withRingback)
     }
 
     /** Follows the call until it ends: the system's call, the proximity lock, the cleanup. */
-    private fun watch(call: ActiveCall) {
+    private fun watch(call: ActiveCall, withRingback: Boolean) {
         scope.launch {
             var activeReported = false
+            // The ringing tone is for the wait until someone answers, not for everyone leaving later.
+            var answered = false
             val (last, _, _) = combine(call.session.state, call.session.camera, telecom.endpoint) { state, camera, out ->
                 Triple(state, camera, out)
             }.first { (state, camera, out) ->
@@ -346,6 +393,8 @@ class CallController(context: Context, private val container: AppContainer) {
                 }
                 if (_current.value === call) {
                     setProximity(state !is CallState.Ended && !camera && out?.kind == AudioOutput.Kind.Earpiece)
+                    if (state is CallState.Active) answered = true
+                    if (withRingback && !answered && state == CallState.WaitingForPeer) ringback.start() else ringback.stop()
                 }
                 state is CallState.Ended
             }
@@ -356,9 +405,10 @@ class CallController(context: Context, private val container: AppContainer) {
     private fun finished(call: ActiveCall, reason: CallEndReason) {
         Log.i(TAG, "call over: $reason")
         if (_current.value === call) {
+            ringback.stop()
             telecom.end(
                 when (reason) {
-                    CallEndReason.PeerHungUp -> DisconnectCause.REMOTE
+                    CallEndReason.PeerHungUp, CallEndReason.EndedForEveryone -> DisconnectCause.REMOTE
                     CallEndReason.Declined -> DisconnectCause.REJECTED
                     CallEndReason.Failed, CallEndReason.NoHpb -> DisconnectCause.ERROR
                     else -> DisconnectCause.LOCAL

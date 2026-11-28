@@ -46,6 +46,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.TextFieldValue
+import talq.core.org.shapeInviteCode
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.withStyle
@@ -119,7 +123,7 @@ class OrgCodeModel(private val organisation: OrganisationController) : ViewModel
 
     /** A code from a link: filled in and looked up at once. */
     fun start(code: String) {
-        input = code.take(40)
+        input = shapeInviteCode(code, code.length).text.take(40)
         lookUp()
     }
 
@@ -228,9 +232,19 @@ fun OrganisationCodeSheet(model: OrgCodeModel, onDismiss: () -> Unit, onUse: (Or
             val card = model.card
             if (card == null) {
                 Text("Use with an organisation", style = MaterialTheme.typography.titleLarge)
+                // Capitals and the code's dashes as it is typed or pasted; the caret stays where it was.
+                var field by remember { mutableStateOf(TextFieldValue(model.input, TextRange(model.input.length))) }
+                // A code set from outside (a link, a reset) replaces the field, caret at its end.
+                LaunchedEffect(model.input) {
+                    if (field.text != model.input) field = TextFieldValue(model.input, TextRange(model.input.length))
+                }
                 OutlinedTextField(
-                    value = model.input,
-                    onValueChange = model::onInput,
+                    value = field,
+                    onValueChange = { typed ->
+                        val shaped = shapeInviteCode(typed.text, typed.selection.end, before = field.text)
+                        field = TextFieldValue(shaped.text, TextRange(shaped.caret))
+                        model.onInput(shaped.text)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !model.busy,
                     singleLine = true,
@@ -239,6 +253,7 @@ fun OrganisationCodeSheet(model: OrgCodeModel, onDismiss: () -> Unit, onUse: (Or
                     isError = model.line != null,
                     supportingText = model.line?.let { message -> { Text(message) } },
                     keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Characters,
                         autoCorrectEnabled = false,
                         keyboardType = KeyboardType.Password,
                         imeAction = ImeAction.Go,

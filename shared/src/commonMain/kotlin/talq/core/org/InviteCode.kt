@@ -61,6 +61,43 @@ fun parseInviteCode(input: String): CodeInput {
     return if (symbols[CODE_SYMBOLS] == checkSymbol(body)) CodeInput.Valid(body) else CodeInput.BadCheck
 }
 
+/** What the code field shows, and where its caret goes. */
+class ShapedCode(val text: String, val caret: Int)
+
+/**
+ * Shapes what is being typed or pasted into the code field: capitals, and a dash after every fourth
+ * symbol up to the check symbol (`XXXX-XXXX-XXXX-XXXX-C`), put in only once the next symbol is there.
+ * Spaces, line breaks and every kind of dash a paste may carry go; any other character stays, in
+ * capitals, so [parseInviteCode] can still say what is wrong. [caret] (an index into [text]) keeps its
+ * place among the symbols. A dash deleted on its own (backspace right after it, [before] being the field's
+ * text until then) takes the symbol before it: the dash alone would only come back.
+ * Letters are not mapped (`I`, `L`, `O` stay as typed): [parseInviteCode] reads them.
+ */
+fun shapeInviteCode(text: String, caret: Int, before: String = ""): ShapedCode {
+    val kept = StringBuilder(text.length)
+    var symbolsBeforeCaret = 0
+    text.forEachIndexed { i, ch ->
+        if (isCodeSeparator(ch)) return@forEachIndexed
+        if (i < caret) symbolsBeforeCaret++
+        kept.append(ch.uppercaseChar())
+    }
+    var symbols = kept.toString()
+    val onlyADashWent = text.length == before.length - 1 &&
+        symbols == before.filterNot(::isCodeSeparator).map { it.uppercaseChar() }.joinToString("")
+    if (onlyADashWent && symbolsBeforeCaret > 0) {
+        symbols = symbols.removeRange(symbolsBeforeCaret - 1, symbolsBeforeCaret)
+        symbolsBeforeCaret--
+    }
+    val out = StringBuilder(symbols.length + 4)
+    var at = -1
+    symbols.forEachIndexed { i, c ->
+        if (i > 0 && i % 4 == 0 && i <= CODE_SYMBOLS) out.append('-')
+        if (i == symbolsBeforeCaret) at = out.length
+        out.append(c)
+    }
+    return ShapedCode(out.toString(), if (at < 0) out.length else at)
+}
+
 /** The check symbol of the 16 canonical [symbols]. */
 fun checkSymbol(symbols: String): Char {
     require(symbols.length == CODE_SYMBOLS) { "a code has $CODE_SYMBOLS symbols" }

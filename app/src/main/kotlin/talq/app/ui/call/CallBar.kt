@@ -44,7 +44,7 @@ fun CallInProgressBar() {
         Icon(Icons.Filled.PhoneInTalk, contentDescription = null, tint = colors.onAccent)
         Spacer(Modifier.width(12.dp))
         Text(
-            "Call with ${call.peerName} · tap to return",
+            if (call.isGroup) "Call in ${call.title} · tap to return" else "Call with ${call.title} · tap to return",
             style = MaterialTheme.typography.labelLarge,
             color = colors.onAccent,
             maxLines = 1,

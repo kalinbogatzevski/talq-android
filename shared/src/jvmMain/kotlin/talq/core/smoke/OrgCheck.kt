@@ -53,6 +53,7 @@ import talq.core.org.checkSymbol
 import talq.core.org.formatInviteCode
 import talq.core.org.newInviteSymbols
 import talq.core.org.parseInviteCode
+import talq.core.org.shapeInviteCode
 import kotlin.system.exitProcess
 
 /**
@@ -109,6 +110,17 @@ object OrgCheck {
         check("code: pasted with a line break", parseInviteCode("0123-4567-89AB-CDEF-1\r\n") == CodeInput.Valid("0123456789ABCDEF"))
         check("code: non-breaking spaces", parseInviteCode("0123\u00A04567\u00A089AB\u00A0CDEF\u00A01") == CodeInput.Valid("0123456789ABCDEF"))
         check("code: typographic dashes", parseInviteCode("0123\u20134567\u201089AB\u2212CDEF\u20141") == CodeInput.Valid("0123456789ABCDEF"))
+        // The field shapes what is typed or pasted (capitals, dashes at the code's places, the caret kept).
+        fun shaped(text: String, caret: Int, before: String = "") = shapeInviteCode(text, caret, before).let { it.text to it.caret }
+        check("shape: capitals and dashes", shaped("0123456789abcdef1", 17) == ("0123-4567-89AB-CDEF-1" to 21))
+        check("shape: pasted with spaces and other dashes", shaped("0123 4567\n89ab\u2013cdef 1", 22).first == "0123-4567-89AB-CDEF-1")
+        check("shape: no dash before the next symbol", shaped("abcd", 4) == ("ABCD" to 4))
+        check("shape: the fifth symbol brings the dash", shaped("ABCDE", 5) == ("ABCD-E" to 6))
+        check("shape: typed in the middle", shaped("ABxCD-EFGH", 3) == ("ABXC-DEFG-H" to 3))
+        check("shape: a deleted dash takes its symbol", shaped("ABCDE", 4, before = "ABCD-E") == ("ABCE" to 3))
+        check("shape: an ordinary delete", shaped("ABCD-", 5, before = "ABCD-E") == ("ABCD" to 4))
+        check("shape: a character in no code stays visible", shaped("u123", 4) == ("U123" to 4))
+        check("shape: the shaped code parses", parseInviteCode(shaped("0123456789abcdef1", 17).first) == CodeInput.Valid("0123456789ABCDEF"))
         // B: diagnostics hide real codes only
         check("hide: dashed code", hideInviteCodes("code 0123-4567-89AB-CDEF-1 here") == "code <hidden> here")
         check("hide: plain lower case", hideInviteCodes("x 0123456789abcdef1 y") == "x <hidden> y")
