@@ -5,12 +5,18 @@ Android sibling of [TalQ for desktop](https://github.com/kalinbogatzevski/talq-d
 Topics (Talk's threads) are first-class: each topic is a tab inside its conversation, with its
 own place, draft, unread count and notification level.
 
-**Status: 0.10.x.** Chat, topics, folders, files, voice messages, notifications and one-to-one calls
-work; group calls are not there yet. See `CHANGELOG.md` for what each version does.
+**Status: 0.12.x.** Chat, topics, folders, files, voice messages, notifications, and one-to-one
+and group calls work. See `CHANGELOG.md` for what each version does.
 
 **Download:** the APKs are on the [releases page](https://github.com/kalinbogatzevski/talq-android/releases):
 `TalQ-android-<version>.apk`, or `TalQ-android-<version>-foss.apk` without the Google push
 route. Each has a `.sha256` file next to it.
+
+**Google Play (beta):** TalQ is in a closed test on Google Play. Join the
+[testers group](https://groups.google.com/g/talq-testers), then
+[become a tester](https://play.google.com/apps/testing/io.github.kalinbogatzevski.talq) with the same
+Google account and install TalQ from Play. An install from Play and one from the releases page
+update each other.
 
 ## What it does
 
